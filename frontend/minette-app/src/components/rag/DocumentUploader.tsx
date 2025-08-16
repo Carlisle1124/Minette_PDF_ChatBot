@@ -1,56 +1,56 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { extractTextFromPdf } from "@/lib/pdf";
-import { chunkText } from "@/lib/chunk";
-import { embedTexts } from "@/lib/embeddings";
-import { vectorStore } from "@/lib/vectorstore";
 import { toast } from "sonner";
 import { Separator } from "@/components/ui/separator";
 import { Trash2 } from "lucide-react";
+import { uploadPdf, PdfChunk, chatWithPdf } from "@/lib/api";
 
-export const DocumentUploader = () => {
+interface UploadedDoc {
+  name: string;
+  summary: string;
+  chunks: PdfChunk[];
+}
+
+interface DocumentUploaderProps {
+  onChunksUpdate?: (chunks: PdfChunk[]) => void;
+}
+
+export const DocumentUploader = ({ onChunksUpdate }: DocumentUploaderProps) => {
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
-  const [version, setVersion] = useState(0); // trigger re-render after add/remove
-
-  const sources = useMemo(() => vectorStore.countsBySource(), [version]);
+  const [docs, setDocs] = useState<UploadedDoc[]>([]);
 
   const onFilesSelected = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
     setLoading(true);
+
     try {
-      let totalChunks = 0;
       for (const file of Array.from(files)) {
-        setStatus(`Reading ${file.name}...`);
-        const { text } = await extractTextFromPdf(file);
-        const chunks = chunkText(text);
-        totalChunks += chunks.length;
-        setStatus(`Embedding ${chunks.length} chunks from ${file.name}...`);
-        const vectors = await embedTexts(chunks);
-        vectorStore.add(
-          vectors.map((embedding, i) => ({
-            text: chunks[i],
-            metadata: { source: file.name },
-            embedding,
-          }))
-        );
+        setStatus(`Uploading ${file.name}...`);
+        const result = await uploadPdf(file);
+        const doc = { name: file.name, summary: result.summary, chunks: result.chunks };
+        setDocs((d) => [...d, doc]);
+        toast.success(`Uploaded ${file.name}`);
+
+        // Notify parent component (Chat) about new chunks
+        if (onChunksUpdate) onChunksUpdate(result.chunks);
       }
-      toast.success(`Added ${totalChunks} chunks. Ready to chat!`);
-      setVersion((v) => v + 1);
     } catch (e: any) {
       console.error(e);
-      toast.error("Failed to process PDFs");
+      toast.error("Failed to upload PDFs: " + (e.message ?? e.toString()));
     } finally {
       setLoading(false);
       setStatus(null);
     }
   };
 
-  const removeSource = (source: string) => {
-    vectorStore.removeBySource(source);
-    toast.success(`Removed ${source}`);
-    setVersion((v) => v + 1);
+  const removeDoc = (name: string) => {
+    setDocs((d) => d.filter((doc) => doc.name !== name));
+    toast.success(`Removed ${name}`);
+    // Update parent
+    const remainingChunks = docs.filter((doc) => doc.name !== name).flatMap((d) => d.chunks);
+    if (onChunksUpdate) onChunksUpdate(remainingChunks);
   };
 
   return (
@@ -65,31 +65,28 @@ export const DocumentUploader = () => {
             accept="application/pdf"
             multiple
             onChange={(e) => onFilesSelected(e.target.files)}
-            aria-label="Upload PDF files"
-            className="block text-sm"
             disabled={loading}
           />
           <Button variant="secondary" disabled>
             {loading ? status ?? "Processing..." : "Choose files"}
           </Button>
-          <div className="text-sm text-muted-foreground sm:ml-auto">
-            {vectorStore.size} chunks indexed
-          </div>
         </div>
 
         <Separator />
 
-        {sources.length === 0 ? (
+        {docs.length === 0 ? (
           <p className="text-sm text-muted-foreground">No PDFs uploaded yet.</p>
         ) : (
           <ul className="space-y-2">
-            {sources.map(({ source, count }) => (
-              <li key={source} className="flex items-center justify-between rounded-md border p-2">
+            {docs.map(({ name, summary }) => (
+              <li key={name} className="flex items-center justify-between rounded-md border p-2">
                 <div className="truncate pr-2">
-                  <span className="font-medium">{source}</span>
-                  <span className="text-muted-foreground text-sm ml-2">{count} chunks</span>
+                  <span className="font-medium">{name}</span>
+                  <span className="text-muted-foreground text-sm ml-2">
+                    {summary.slice(0, 60)}...
+                  </span>
                 </div>
-                <Button variant="destructive" size="sm" onClick={() => removeSource(source)} aria-label={`Delete ${source}`}>
+                <Button variant="destructive" size="sm" onClick={() => removeDoc(name)}>
                   <Trash2 className="h-4 w-4" />
                 </Button>
               </li>

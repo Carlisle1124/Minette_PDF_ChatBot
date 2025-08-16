@@ -1,26 +1,16 @@
-import { pipeline } from '@huggingface/transformers';
-
-let extractorPromise: Promise<any> | null = null;
-
-async function getExtractor() {
-  if (!extractorPromise) {
-    extractorPromise = pipeline(
-      'feature-extraction',
-      'mixedbread-ai/mxbai-embed-xsmall-v1',
-      { 
-        device: 'cpu',  // or 'cuda' if you have NVIDIA GPU
-        quantized: true // reduces memory usage
-      }
-    );
-  }
-  return extractorPromise;
-}
+// src/lib/embeddings.ts
+let embeddingPipeline: any = null;
 
 export async function embedTexts(texts: string[]): Promise<number[][]> {
-  const extractor = await getExtractor();
-  const output = await extractor(texts, {
-    pooling: 'mean',
-    normalize: true
-  });
-  return output.tolist(); // Convert tensor to JavaScript array
+  if (!embeddingPipeline) {
+    const { pipeline } = await import("@xenova/transformers");
+    embeddingPipeline = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2");
+  }
+
+  const vectors: number[][] = [];
+  for (const text of texts) {
+    const result = await embeddingPipeline(text, { pooling: "mean", normalize: true });
+    vectors.push(Array.from(result.data));
+  }
+  return vectors;
 }

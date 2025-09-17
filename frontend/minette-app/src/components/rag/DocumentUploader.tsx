@@ -4,19 +4,14 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { toast } from "sonner";
 import { Separator } from "@/components/ui/separator";
 import { Trash2 } from "lucide-react";
-import { uploadPdf, PdfChunk, chatWithPdf } from "@/lib/api";
+import { uploadPdf } from "@/lib/api";
 
 interface UploadedDoc {
   name: string;
-  summary: string;
-  chunks: PdfChunk[];
+  chunks: number;
 }
 
-interface DocumentUploaderProps {
-  onChunksUpdate?: (chunks: PdfChunk[]) => void;
-}
-
-export const DocumentUploader = ({ onChunksUpdate }: DocumentUploaderProps) => {
+export const DocumentUploader = () => {
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [docs, setDocs] = useState<UploadedDoc[]>([]);
@@ -29,12 +24,12 @@ export const DocumentUploader = ({ onChunksUpdate }: DocumentUploaderProps) => {
       for (const file of Array.from(files)) {
         setStatus(`Uploading ${file.name}...`);
         const result = await uploadPdf(file);
-        const doc = { name: file.name, summary: result.summary, chunks: result.chunks };
+        const doc: UploadedDoc = {
+          name: result.filename ?? file.name,
+          chunks: result.chunks,
+        };
         setDocs((d) => [...d, doc]);
-        toast.success(`Uploaded ${file.name}`);
-
-        // Notify parent component (Chat) about new chunks
-        if (onChunksUpdate) onChunksUpdate(result.chunks);
+        toast.success(`Indexed ${doc.name} (${doc.chunks} chunks)`);
       }
     } catch (e: any) {
       console.error(e);
@@ -48,9 +43,6 @@ export const DocumentUploader = ({ onChunksUpdate }: DocumentUploaderProps) => {
   const removeDoc = (name: string) => {
     setDocs((d) => d.filter((doc) => doc.name !== name));
     toast.success(`Removed ${name}`);
-    // Update parent
-    const remainingChunks = docs.filter((doc) => doc.name !== name).flatMap((d) => d.chunks);
-    if (onChunksUpdate) onChunksUpdate(remainingChunks);
   };
 
   return (
@@ -78,15 +70,22 @@ export const DocumentUploader = ({ onChunksUpdate }: DocumentUploaderProps) => {
           <p className="text-sm text-muted-foreground">No PDFs uploaded yet.</p>
         ) : (
           <ul className="space-y-2">
-            {docs.map(({ name, summary }) => (
-              <li key={name} className="flex items-center justify-between rounded-md border p-2">
+            {docs.map(({ name, chunks }) => (
+              <li
+                key={name}
+                className="flex items-center justify-between rounded-md border p-2"
+              >
                 <div className="truncate pr-2">
                   <span className="font-medium">{name}</span>
                   <span className="text-muted-foreground text-sm ml-2">
-                    {summary.slice(0, 60)}...
+                    {chunks} chunks
                   </span>
                 </div>
-                <Button variant="destructive" size="sm" onClick={() => removeDoc(name)}>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={() => removeDoc(name)}
+                >
                   <Trash2 className="h-4 w-4" />
                 </Button>
               </li>

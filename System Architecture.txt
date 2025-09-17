@@ -1,0 +1,25 @@
+[React Frontend]  <----HTTP---->  [Python Backend API]  <---->  [Vector DB]  
+       |                                   |                          |
+       |                                   |                          |
+       V                                   V                          V
+   User Query  --->  Backend parses --->  Embedding + Retrieval ---> Context Chunks
+                                |
+                                V
+                         Send context + query to Ollama
+                                |
+                                V
+                           Ollama LLM response
+                                |
+                                V
+                      Return to React for display
+
+backend/
+│── main.py               # FastAPI/Flask entrypoint
+│── rag_pipeline.py       # RAG logic (retrieval + generation)
+│── db/
+│    └── chroma_store/    # Vector DB files
+│── utils/
+│    ├── chunker.py       # Text chunking
+│    ├── embedder.py      # Embedding functions
+│    └── ollama_client.py # Ollama API calls
+│── requirements.txt

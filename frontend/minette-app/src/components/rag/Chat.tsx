@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { DocumentUploader } from "./DocumentUploader";
 import { toast } from "sonner";
-import { chatWithPdf, PdfChunk } from "@/lib/api";
+import { chat } from "@/lib/api";
 
 interface Message {
   role: "user" | "assistant";
@@ -17,11 +17,14 @@ export const Chat = () => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
-  const [pdfChunks, setPdfChunks] = useState<PdfChunk[]>([]);
+
   const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" });
+    listRef.current?.scrollTo({
+      top: listRef.current.scrollHeight,
+      behavior: "smooth",
+    });
   }, [messages]);
 
   const ask = async () => {
@@ -32,11 +35,11 @@ export const Chat = () => {
     setBusy(true);
 
     try {
-      const data = await chatWithPdf(question, pdfChunks);
+      const data = await chat(question);
       setMessages((m) => [...m, { role: "assistant", content: data.answer }]);
     } catch (e) {
       console.error(e);
-      toast.error("Failed to reach backend, is server.ts running?");
+      toast.error("Failed to reach backend, is it running?");
     } finally {
       setBusy(false);
     }
@@ -48,16 +51,20 @@ export const Chat = () => {
         <div className="flex flex-col gap-4">
           <h1 className="text-3xl font-semibold">PDF AI Chatbot</h1>
           <p className="text-muted-foreground max-w-2xl">
-            Upload PDFs and ask questions. The assistant uses your local Ollama model.
+            Upload PDFs and ask questions. The assistant uses your local Ollama
+            model.
           </p>
-          <DocumentUploader onChunksUpdate={setPdfChunks} />
+          <DocumentUploader />
         </div>
       </section>
 
       <section>
         <Card>
           <CardContent className="p-0">
-            <div ref={listRef} className="max-h-[50vh] overflow-auto p-4 space-y-4">
+            <div
+              ref={listRef}
+              className="max-h-[50vh] overflow-auto p-4 space-y-4"
+            >
               {messages.length === 0 ? (
                 <div className="text-sm text-muted-foreground">
                   No messages yet. Upload a PDF and ask a question!
@@ -66,7 +73,11 @@ export const Chat = () => {
                 messages.map((msg, idx) => (
                   <div
                     key={idx}
-                    className={msg.role === "user" ? "text-foreground" : "text-muted-foreground"}
+                    className={
+                      msg.role === "user"
+                        ? "text-foreground"
+                        : "text-muted-foreground"
+                    }
                   >
                     <span className="text-xs uppercase tracking-wide mr-2 opacity-70">
                       {msg.role}

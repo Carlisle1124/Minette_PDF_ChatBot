@@ -1,31 +1,41 @@
-// src/lib/api.ts
-
-export interface PdfChunk {
+export interface ChatResponseContext {
   text: string;
+  score: number;
 }
 
-export async function uploadPdf(file: File) {
-  const formData = new FormData();
-  formData.append("pdf", file);
+export interface ChatResponse {
+  answer: string;
+  contexts: ChatResponseContext[];
+}
 
-  const res = await fetch("http://localhost:5000/api/upload", {
+const BASE_URL = (import.meta as any).env?.VITE_BACKEND_URL ?? "http://localhost:8000";
+
+export async function uploadPdf(file: File): Promise<{ filename: string; chunks: number }>{
+  const form = new FormData();
+  form.append("file", file);
+
+  const res = await fetch(`${BASE_URL}/ingest/pdf`, {
     method: "POST",
-    body: formData,
+    body: form,
   });
-
-  if (!res.ok) throw new Error("Failed to upload PDF");
-
-  return await res.json() as { summary: string; chunks: PdfChunk[] };
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Upload failed (${res.status}): ${text}`);
+  }
+  return res.json();
 }
 
-export async function chatWithPdf(query: string, contexts?: PdfChunk[]) {
-  const res = await fetch("http://localhost:5000/api/chat", {
+export async function chat(question: string, topK?: number): Promise<ChatResponse> {
+  const res = await fetch(`${BASE_URL}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query, contexts }),
+    body: JSON.stringify({ message: question, top_k: topK }),
   });
-
-  if (!res.ok) throw new Error("Chat request failed");
-
-  return await res.json() as { answer: string };
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Chat failed (${res.status}): ${text}`);
+  }
+  return res.json();
 }
+
+

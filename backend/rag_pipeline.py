@@ -44,6 +44,7 @@ class RAGPipeline:
             path=persist_directory,
             settings=Settings(anonymized_telemetry=False),
         )
+        self.collection_name = collection_name
         self.collection = self.client.get_or_create_collection(collection_name)
         self.ollama = OllamaClient()
         self.top_k = top_k
@@ -52,12 +53,105 @@ class RAGPipeline:
     def ingest_document(self, doc_id: str, text: str, metadata: dict | None = None) -> int:
         chunks = chunk_text(text)
         if not chunks:
+            print(f"No chunks generated for document: {doc_id}")
             return 0
+        
+        print(f"Ingesting document '{doc_id}' with {len(chunks)} chunks")
+        print(f"Document metadata: {metadata}")
+        
         embeddings = [self.ollama.embed(chunk) for chunk in chunks]
         ids = [f"{doc_id}:{i}" for i in range(len(chunks))]
         metadatas = [{"doc_id": doc_id, **(metadata or {})} for _ in chunks]
+        
+        print(f"Generated chunk IDs: {ids[:3]}{'...' if len(ids) > 3 else ''}")
+        
         self.collection.add(ids=ids, documents=chunks, embeddings=embeddings, metadatas=metadatas)
+        
+        # Verify ingestion
+        collection_count = self.collection.count()
+        print(f"Total chunks in collection after ingestion: {collection_count}")
+        
         return len(chunks)
+
+    def remove_document(self, doc_id: str) -> bool:
+        """
+        Remove all chunks associated with a document from the vector store
+        """
+        try:
+            # Get all document IDs that match the pattern doc_id:*
+            collection_data = self.collection.get()
+            ids_to_delete = []
+            
+            if collection_data and collection_data.get("ids"):
+                for chunk_id in collection_data["ids"]:
+                    if chunk_id.startswith(f"{doc_id}:"):
+                        ids_to_delete.append(chunk_id)
+            
+            if ids_to_delete:
+                self.collection.delete(ids=ids_to_delete)
+                print(f"Removed {len(ids_to_delete)} chunks for document: {doc_id}")
+            else:
+                print(f"No chunks found for document: {doc_id}")
+            
+            return True
+        except Exception as e:
+            print(f"Error removing document {doc_id}: {str(e)}")
+            return False
+
+    def clear_all_documents(self) -> bool:
+        """
+        Clear all documents from the vector store
+        """
+        try:
+            # Log what we're about to clear
+            collection_count = self.collection.count()
+            print(f"Clearing {collection_count} chunks from vector store")
+            
+            # Delete the entire collection and recreate it
+            self.client.delete_collection(self.collection_name)
+            self.collection = self.client.get_or_create_collection(self.collection_name)
+            
+            # Verify clearing worked
+            new_count = self.collection.count()
+            print(f"Vector store cleared. New count: {new_count}")
+            return True
+        except Exception as e:
+            print(f"Error clearing all documents: {str(e)}")
+            return False
+
+    def get_all_documents_info(self) -> dict:
+        """
+        Get information about all documents in the vector store
+        """
+        try:
+            collection_data = self.collection.get()
+            
+            info = {
+                "total_chunks": len(collection_data.get("ids", [])),
+                "documents": {}
+            }
+            
+            if collection_data and collection_data.get("ids"):
+                for chunk_id, metadata in zip(collection_data["ids"], collection_data.get("metadatas", [])):
+                    if metadata:
+                        doc_id = metadata.get("doc_id", "unknown")
+                        filename = metadata.get("filename", "unknown")
+                        
+                        if doc_id not in info["documents"]:
+                            info["documents"][doc_id] = {
+                                "filename": filename,
+                                "chunk_count": 0,
+                                "chunk_ids": []
+                            }
+                        
+                        info["documents"][doc_id]["chunk_count"] += 1
+                        info["documents"][doc_id]["chunk_ids"].append(chunk_id)
+            
+            print(f"Current vector store contents: {info}")
+            return info
+        except Exception as e:
+            print(f"Error getting documents info: {str(e)}")
+            return {"error": str(e)}
 
     # --- Retrieval ---
     def retrieve(self, query: str, k: int | None = None) -> List[RetrievedContext]:
@@ -66,20 +160,36 @@ class RAGPipeline:
         
         # Check if collection is empty first
         collection_count = self.collection.count()
+        print(f"Collection has {collection_count} total chunks")
+        
         if collection_count == 0:
+            print("No documents in collection to retrieve from")
             return []
         
         # Ensure k doesn't exceed available documents
         k = min(k, collection_count)
+        print(f"Retrieving top {k} chunks for query: '{query[:50]}...'")
         
         try:
             results = self.collection.query(query_embeddings=[query_embed], n_results=k)
+            
+            # Log what we retrieved
+            docs = (results.get("documents") or [[]])[0]
+            distances = (results.get("distances") or [[]])[0]
+            ids = (results.get("ids") or [[]])[0]
+            metadatas = (results.get("metadatas") or [[]])[0]
+            
+            print(f"Retrieved {len(docs)} chunks:")
+            for i, (chunk_id, metadata, distance) in enumerate(zip(ids, metadatas, distances)):
+                doc_id = metadata.get("doc_id", "unknown") if metadata else "unknown"
+                filename = metadata.get("filename", "unknown") if metadata else "unknown"
+                print(f"  {i+1}. ID: {chunk_id}, Doc: {doc_id}, File: {filename}, Distance: {distance:.4f}")
+                print(f"     Content preview: {docs[i][:100]}...")
+                
         except Exception as e:
             print(f"ChromaDB query error: {e}")
             return []
 
-        docs = (results.get("documents") or [[]])[0]
-        distances = (results.get("distances") or [[]])[0]
         out: List[RetrievedContext] = []
         for doc, dist in zip(docs, distances):
             score = 1.0 - float(dist) if dist is not None else 0.0

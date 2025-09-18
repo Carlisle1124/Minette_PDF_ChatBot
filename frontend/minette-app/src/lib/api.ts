@@ -38,4 +38,26 @@ export async function chat(question: string, topK?: number): Promise<ChatRespons
   return res.json();
 }
 
+export async function deleteDocument(filename: string): Promise<{ message: string }> {
+  const res = await fetch(`${BASE_URL}/documents/${encodeURIComponent(filename)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Delete failed (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+export async function clearAllDocuments(): Promise<{ message: string }> {
+  const res = await fetch(`${BASE_URL}/documents/clear`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Clear all failed (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
 

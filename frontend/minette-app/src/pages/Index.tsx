@@ -1,21 +1,80 @@
+import { useState } from "react";
 import { Chat } from "@/components/rag/Chat";
 import turtle from "@/assets/minette-turtle.png";
 import { ThemeToggle } from "@/components/theme/ThemeToggle";
+import {
+  NotificationsButton,
+  type Notification,
+} from "@/components/ui/notifications";
+import { v4 as uuidv4 } from "uuid";
 
 const Index = () => {
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+
+  // Add notification handler
+  const addNotification = (
+    title: string,
+    message: string,
+    type: "info" | "success" | "warning" | "error" = "info"
+  ) => {
+    const newNotification: Notification = {
+      id: uuidv4(),
+      title,
+      message,
+      timestamp: new Date(),
+      read: false,
+      type,
+    };
+    setNotifications((prev) => [newNotification, ...prev]);
+  };
+
+  // Mark notification as read
+  const markAsRead = (id: string) => {
+    setNotifications((prev) =>
+      prev.map((notification) =>
+        notification.id === id ? { ...notification, read: true } : notification
+      )
+    );
+  };
+
+  // Clear all notifications
+  const clearAllNotifications = () => {
+    setNotifications([]);
+  };
+
+  const handleDocumentDeleted = () => {
+    // Additional handling if needed when documents are deleted
+  };
   return (
     <main className="container py-10 space-y-8">
       <header className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-3">
-          <img src={turtle} alt="Minette turtle logo" className="h-10 w-10" loading="lazy" />
+          <img
+            src={turtle}
+            alt="Minette turtle logo"
+            className="h-10 w-10"
+            loading="lazy"
+          />
           <div className="space-y-1">
             <h1 className="text-3xl font-bold">Minette</h1>
-            <p className="text-muted-foreground">Local-first RAG with Ollama (Llama 3) + semantic search.</p>
+            <p className="text-muted-foreground">
+              Local-first RAG with Ollama (Llama 3) + semantic search.
+            </p>
           </div>
         </div>
-        <ThemeToggle />
+        <div className="flex items-center gap-2">
+          <NotificationsButton
+            notifications={notifications}
+            onMarkAsRead={markAsRead}
+            onClearAll={clearAllNotifications}
+          />
+          <ThemeToggle />
+        </div>
       </header>
-      <Chat />
+      <Chat
+        onNotification={addNotification}
+        onDocumentDeleted={handleDocumentDeleted}
+      />
     </main>
   );
 };

@@ -21,7 +21,7 @@ class OllamaClient:
         base_url: Optional[str] = None,
         chat_model: Optional[str] = None,
         embed_model: Optional[str] = None,
-        request_timeout_seconds: int = 120,
+        request_timeout_seconds: int = 180,
     ) -> None:
         self.base_url = base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         # You can change these defaults to any locally available models

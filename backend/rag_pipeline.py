@@ -4,6 +4,10 @@ import os
 from dataclasses import dataclass
 from typing import List, Tuple
 
+# Disable Chroma telemetry as early as possible (before import)
+os.environ.setdefault("CHROMA_TELEMETRY_IMPLEMENTATION", "none")
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
+
 import chromadb
 from chromadb.config import Settings
 
@@ -23,10 +27,18 @@ class RetrievedContext:
 class RAGPipeline:
     def __init__(
         self,
-        persist_directory: str = "backend/db/chrome_store",
+        persist_directory: str | None = None,
         collection_name: str = DEFAULT_COLLECTION,
         top_k: int = 5,
     ) -> None:
+        # Ensure Chroma telemetry is fully disabled to avoid noisy warnings
+        os.environ.setdefault("CHROMA_TELEMETRY_IMPLEMENTATION", "none")
+
+        # Resolve persist directory relative to this file if not provided
+        if not persist_directory:
+            base_dir = os.path.dirname(__file__)
+            persist_directory = os.path.join(base_dir, "db", "chrome_store")
+
         os.makedirs(persist_directory, exist_ok=True)
         self.client = chromadb.PersistentClient(
             path=persist_directory,
@@ -51,7 +63,20 @@ class RAGPipeline:
     def retrieve(self, query: str, k: int | None = None) -> List[RetrievedContext]:
         k = k or self.top_k
         query_embed = self.ollama.embed(query)
-        results = self.collection.query(query_embeddings=[query_embed], n_results=k)
+        
+        # Check if collection is empty first
+        collection_count = self.collection.count()
+        if collection_count == 0:
+            return []
+        
+        # Ensure k doesn't exceed available documents
+        k = min(k, collection_count)
+        
+        try:
+            results = self.collection.query(query_embeddings=[query_embed], n_results=k)
+        except Exception as e:
+            print(f"ChromaDB query error: {e}")
+            return []
 
         docs = (results.get("documents") or [[]])[0]
         distances = (results.get("distances") or [[]])[0]

@@ -29,7 +29,10 @@ app.add_middleware(
 
 ollama = OllamaClient()
 
-rag = RAGPipeline(persist_directory=os.path.join("backend", "db", "chrome_store"))
+# Persist ChromaDB under backend/db/chrome_store regardless of CWD
+_base_dir = os.path.dirname(__file__)
+_persist_dir = os.path.join(_base_dir, "db", "chrome_store")
+rag = RAGPipeline(persist_directory=_persist_dir)
 
 
 class ChatRequest(BaseModel):

@@ -266,6 +266,7 @@ temp/
 *.njsproj
 *.sln
 *.sw?
+.specify/
 
 # OS generated files
 Thumbs.db

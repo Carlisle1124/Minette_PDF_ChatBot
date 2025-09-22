@@ -4,7 +4,22 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { toast } from "sonner";
 import { Separator } from "@/components/ui/separator";
 import { Trash2 } from "lucide-react";
-import { uploadPdf, deleteDocument, clearAllDocuments } from "@/lib/api";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  uploadPdf,
+  deleteDocument,
+  clearAllDocuments,
+  addPdf,
+  fetchDocuments,
+} from "@/lib/api";
+import { ChatStorageManager } from "@/lib/chatStorage";
 
 interface UploadedDoc {
   name: string;
@@ -29,38 +44,53 @@ export const DocumentUploader = ({
   const [docs, setDocs] = useState<UploadedDoc[]>([]);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [clearingAll, setClearingAll] = useState(false);
+  const [showClearAllDialog, setShowClearAllDialog] = useState(false);
 
   const onFilesSelected = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
     setLoading(true);
 
     try {
-      // Clear frontend state - backend will auto-clear vector store
-      setDocs([]);
-
+      // Process each file without clearing existing documents
       for (const file of Array.from(files)) {
-        setStatus(`Uploading ${file.name}...`);
-        const result = await uploadPdf(file);
+        setStatus(`Adding ${file.name}...`);
+        const result = await addPdf(file);
         const doc: UploadedDoc = {
           name: result.filename ?? file.name,
           chunks: result.chunks,
         };
-        setDocs((d) => [...d, doc]);
-        toast.success(`Indexed ${doc.name} (${doc.chunks} chunks)`);
+
+        // Update or add the document in the list
+        setDocs((d) => {
+          const existingIndex = d.findIndex(
+            (existing) => existing.name === doc.name
+          );
+          if (existingIndex >= 0) {
+            // Replace existing document
+            const newDocs = [...d];
+            newDocs[existingIndex] = doc;
+            return newDocs;
+          } else {
+            // Add new document
+            return [...d, doc];
+          }
+        });
+
+        toast.success(`Added/Updated ${doc.name} (${doc.chunks} chunks)`);
+
+        // Associate document with current chat
+        ChatStorageManager.addDocumentToCurrentChat(doc.name, doc.chunks);
 
         if (onNotification) {
           onNotification(
-            "Document uploaded",
-            `Successfully indexed ${doc.name} with ${doc.chunks} chunks`,
+            "Document added",
+            `Successfully added ${doc.name} with ${doc.chunks} chunks to existing context`,
             "success"
           );
         }
       }
 
-      // Auto-clear chat when new documents are uploaded
-      if (onDocumentDeleted) {
-        onDocumentDeleted();
-      }
+      // Note: We don't auto-clear chat when adding documents to existing context
     } catch (e: any) {
       console.error(e);
       const errorMessage =
@@ -81,6 +111,10 @@ export const DocumentUploader = ({
     try {
       await deleteDocument(name);
       setDocs((d) => d.filter((doc) => doc.name !== name));
+
+      // Remove document from current chat's context
+      ChatStorageManager.removeDocumentFromCurrentChat(name);
+
       toast.success(`Removed ${name}`);
 
       if (onNotification) {
@@ -112,14 +146,50 @@ export const DocumentUploader = ({
   const clearAllDocs = async (showNotification: boolean = true) => {
     setClearingAll(true);
     try {
-      await clearAllDocuments();
-      setDocs([]);
-      toast.success("All documents cleared");
+      // Get current chat's documents only
+      const currentChatDocuments = ChatStorageManager.getCurrentChatDocuments();
+
+      if (currentChatDocuments.length === 0) {
+        toast.info("No documents to clear for current chat");
+        if (showNotification && onNotification) {
+          onNotification(
+            "No documents",
+            "Current chat has no documents to clear",
+            "info"
+          );
+        }
+        return;
+      }
+
+      // Delete only documents associated with current chat
+      for (const docName of currentChatDocuments) {
+        try {
+          await deleteDocument(docName);
+          console.log(`Cleared document: ${docName}`);
+        } catch (e) {
+          console.error(`Failed to clear document ${docName}:`, e);
+        }
+      }
+
+      // Update UI - remove only current chat's documents
+      setDocs((d) =>
+        d.filter((doc) => !currentChatDocuments.includes(doc.name))
+      );
+
+      // Clear document context from current chat
+      const currentChatId = ChatStorageManager.getCurrentChatId();
+      if (currentChatId) {
+        ChatStorageManager.updateDocumentContext(currentChatId, [], 0);
+      }
+
+      toast.success(
+        `Cleared ${currentChatDocuments.length} document(s) from current chat`
+      );
 
       if (showNotification && onNotification) {
         onNotification(
           "Documents cleared",
-          "All documents have been removed from the system",
+          `Removed ${currentChatDocuments.length} document(s) from current chat`,
           "info"
         );
       }
@@ -143,73 +213,109 @@ export const DocumentUploader = ({
   };
 
   return (
-    <Card className="border-muted/50">
-      <CardHeader>
-        <CardTitle>Manage PDFs</CardTitle>
-        <p className="text-sm text-muted-foreground mt-1">
-          New uploads automatically clear existing documents to ensure fresh
-          context.
-        </p>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-4">
-        <div className="flex flex-col sm:flex-row sm:items-center gap-3">
-          <input
-            type="file"
-            accept="application/pdf"
-            multiple
-            onChange={(e) => onFilesSelected(e.target.files)}
-            disabled={loading}
-          />
-          <Button variant="secondary" disabled>
-            {loading ? status ?? "Processing..." : "Choose files"}
-          </Button>
-        </div>
+    <>
+      <Card className="border-muted/50">
+        <CardHeader>
+          <CardTitle>Manage PDFs</CardTitle>
+          <p className="text-sm text-muted-foreground mt-1">
+            Add PDFs to the AI's context. Multiple documents can be added to
+            provide richer context for your questions.
+          </p>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+            <input
+              type="file"
+              accept="application/pdf"
+              multiple
+              onChange={(e) => onFilesSelected(e.target.files)}
+              disabled={loading}
+            />
+            <Button variant="secondary" disabled>
+              {loading ? status ?? "Processing..." : "Choose files"}
+            </Button>
+          </div>
 
-        <Separator />
+          <Separator />
 
-        {docs.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No PDFs uploaded yet.</p>
-        ) : (
-          <>
-            <div className="flex justify-between items-center mb-2">
-              <span className="text-sm font-medium">Uploaded Documents:</span>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => clearAllDocs()}
-                disabled={clearingAll || loading}
-                className="text-destructive hover:text-destructive"
-              >
-                {clearingAll ? "Clearing..." : "Clear All"}
-              </Button>
-            </div>
-            <ul className="space-y-2">
-              {docs.map(({ name, chunks }) => (
-                <li
-                  key={name}
-                  className="flex items-center justify-between rounded-md border p-2"
+          {docs.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No PDFs uploaded yet.
+            </p>
+          ) : (
+            <>
+              <div className="flex justify-between items-center mb-2">
+                <span className="text-sm font-medium">Uploaded Documents:</span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowClearAllDialog(true)}
+                  disabled={clearingAll || loading}
+                  className="text-destructive hover:text-destructive"
                 >
-                  <div className="truncate pr-2">
-                    <span className="font-medium">{name}</span>
-                    <span className="text-muted-foreground text-sm ml-2">
-                      {chunks} chunks
-                    </span>
-                  </div>
-                  <Button
-                    variant="destructive"
-                    size="sm"
-                    onClick={() => removeDoc(name)}
-                    disabled={deleting === name || loading || clearingAll}
+                  {clearingAll ? "Clearing..." : "Clear Chat Documents"}
+                </Button>
+              </div>
+              <ul className="space-y-2">
+                {docs.map(({ name, chunks }) => (
+                  <li
+                    key={name}
+                    className="flex items-center justify-between rounded-md border p-2"
                   >
-                    <Trash2 className="h-4 w-4" />
-                    {deleting === name && <span className="ml-1">...</span>}
-                  </Button>
-                </li>
-              ))}
-            </ul>
-          </>
-        )}
-      </CardContent>
-    </Card>
+                    <div className="truncate pr-2">
+                      <span className="font-medium">{name}</span>
+                      <span className="text-muted-foreground text-sm ml-2">
+                        {chunks} chunks
+                      </span>
+                    </div>
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      onClick={() => removeDoc(name)}
+                      disabled={deleting === name || loading || clearingAll}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                      {deleting === name && <span className="ml-1">...</span>}
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </CardContent>
+      </Card>
+
+      <Dialog open={showClearAllDialog} onOpenChange={setShowClearAllDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Clear Current Chat Documents</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to remove all documents from the current
+              chat? This will only affect the current conversation and preserve
+              documents in other chats.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setShowClearAllDialog(false)}
+              disabled={clearingAll}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={async () => {
+                setShowClearAllDialog(false);
+                await clearAllDocs();
+              }}
+              disabled={clearingAll}
+            >
+              {clearingAll ? "Clearing..." : "Yes, Clear Chat Documents"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 };

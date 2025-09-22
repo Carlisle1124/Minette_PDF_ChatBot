@@ -65,6 +65,43 @@ class OllamaClient:
             raise RuntimeError("Unexpected chat response from Ollama")
         return content
 
+    def chat_stream(self, messages: List[Dict[str, str]], temperature: float = 0.2):
+        """
+        Stream chat completion responses from Ollama.
+        Yields partial content as it becomes available.
+        """
+        import json
+        
+        url = f"{self.base_url}/api/chat"
+        payload: Dict[str, object] = {
+            "model": self.chat_model,
+            "messages": messages,
+            "stream": True,
+            "options": {"temperature": temperature},
+        }
+        
+        with requests.post(url, json=payload, timeout=self.timeout, stream=True) as resp:
+            resp.raise_for_status()
+            
+            for line in resp.iter_lines():
+                if line:
+                    try:
+                        data = json.loads(line.decode('utf-8'))
+                        message = data.get("message", {})
+                        content = message.get("content", "")
+                        
+                        # Only yield if there's actual content
+                        if content:
+                            yield content
+                            
+                        # Check if this is the final message
+                        if data.get("done", False):
+                            break
+                            
+                    except json.JSONDecodeError:
+                        # Skip malformed JSON lines
+                        continue
+
 
 __all__ = ["OllamaClient"]
 

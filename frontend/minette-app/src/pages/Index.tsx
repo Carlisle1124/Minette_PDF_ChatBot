@@ -7,6 +7,7 @@ import {
   type Notification,
 } from "@/components/ui/notifications";
 import { v4 as uuidv4 } from "uuid";
+import { Link } from "react-router-dom";
 
 const Index = () => {
   const [notifications, setNotifications] = useState<Notification[]>([]);
@@ -42,6 +43,13 @@ const Index = () => {
     setNotifications([]);
   };
 
+  // Clear individual notification
+  const clearIndividualNotification = (id: string) => {
+    setNotifications((prev) =>
+      prev.filter((notification) => notification.id !== id)
+    );
+  };
+
   const handleDocumentDeleted = () => {
     // Additional handling if needed when documents are deleted
   };
@@ -63,10 +71,17 @@ const Index = () => {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <Link
+            to="/debug/documents"
+            className="text-sm text-muted-foreground hover:text-foreground transition-colors"
+          >
+            Debug
+          </Link>
           <NotificationsButton
             notifications={notifications}
             onMarkAsRead={markAsRead}
             onClearAll={clearAllNotifications}
+            onClearIndividual={clearIndividualNotification}
           />
           <ThemeToggle />
         </div>

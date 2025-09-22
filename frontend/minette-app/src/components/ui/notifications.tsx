@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Bell } from "lucide-react";
+import { Bell, X } from "lucide-react";
 import { Button } from "./button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./dialog";
 import { ScrollArea } from "./scroll-area";
@@ -17,12 +17,14 @@ interface NotificationsProps {
   notifications: Notification[];
   onMarkAsRead: (id: string) => void;
   onClearAll: () => void;
+  onClearIndividual: (id: string) => void;
 }
 
 export function NotificationsButton({
   notifications = [],
   onMarkAsRead,
   onClearAll,
+  onClearIndividual,
 }: NotificationsProps) {
   const [open, setOpen] = useState(false);
   const unreadCount = notifications.filter((n) => !n.read).length;
@@ -77,7 +79,7 @@ export function NotificationsButton({
                 {notifications.map((notification) => (
                   <div
                     key={notification.id}
-                    className={`rounded-lg border p-3 cursor-pointer transition-colors hover:bg-muted/50 ${
+                    className={`rounded-lg border p-3 cursor-pointer transition-colors hover:bg-muted/50 relative group ${
                       notification.read
                         ? "bg-background"
                         : getTypeColor(notification.type)
@@ -85,10 +87,25 @@ export function NotificationsButton({
                     onClick={() => onMarkAsRead(notification.id)}
                   >
                     <div className="flex justify-between items-start">
-                      <h4 className="font-medium">{notification.title}</h4>
-                      <span className="text-xs text-muted-foreground">
-                        {new Date(notification.timestamp).toLocaleTimeString()}
-                      </span>
+                      <h4 className="font-medium pr-6">{notification.title}</h4>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-muted-foreground">
+                          {new Date(
+                            notification.timestamp
+                          ).toLocaleTimeString()}
+                        </span>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-4 w-4 opacity-0 group-hover:opacity-100 transition-opacity"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onClearIndividual(notification.id);
+                          }}
+                        >
+                          <X className="h-3 w-3" />
+                        </Button>
+                      </div>
                     </div>
                     <p className="text-sm mt-1 text-muted-foreground">
                       {notification.message}

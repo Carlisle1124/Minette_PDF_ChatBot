@@ -1,4 +1,11 @@
 {
+  "scripts": {
+    "postinstall": "npm install --prefix frontend/minette-app",
+    "dev": "npm run dev --prefix frontend/minette-app",
+    "build": "npm run build --prefix frontend/minette-app",
+    "preview": "npm run preview --prefix frontend/minette-app",
+    "install:frontend": "npm install --prefix frontend/minette-app"
+  },
   "devDependencies": {
     "@types/node": "^24.2.1",
     "@types/react-router-dom": "^5.3.3",

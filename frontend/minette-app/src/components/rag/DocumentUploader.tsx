@@ -18,6 +18,8 @@ import {
   clearAllDocuments,
   addPdf,
   fetchDocuments,
+  createNewBackendChat,
+  switchBackendChat,
 } from "@/lib/api";
 import { ChatStorageManager } from "@/lib/chatStorage";
 
@@ -54,7 +56,33 @@ export const DocumentUploader = ({
       // Process each file without clearing existing documents
       for (const file of Array.from(files)) {
         setStatus(`Adding ${file.name}...`);
-        const result = await addPdf(file);
+        // Get current chat ID for the upload
+        const currentChatId = ChatStorageManager.getCurrentChatId();
+        let chatId = currentChatId;
+
+        // If no current chat, create a new one in frontend
+        if (!chatId) {
+          const title = `Chat ${new Date().toLocaleDateString()}`;
+          const newChat = ChatStorageManager.createNewChat(title);
+          chatId = newChat.id;
+        }
+
+        // Always ensure backend is using the same chat context as frontend
+        // The backend will create the chat context if it doesn't exist
+        try {
+          await switchBackendChat(chatId);
+          console.log(`Backend switched to chat context: ${chatId}`);
+        } catch (backendError) {
+          console.error(
+            `Failed to switch backend to chat ${chatId}:`,
+            backendError
+          );
+          throw new Error(
+            `Could not establish backend chat context: ${backendError}`
+          );
+        }
+
+        const result = await addPdf(file, chatId);
         const doc: UploadedDoc = {
           name: result.filename ?? file.name,
           chunks: result.chunks,
@@ -78,7 +106,7 @@ export const DocumentUploader = ({
 
         toast.success(`Added/Updated ${doc.name} (${doc.chunks} chunks)`);
 
-        // Associate document with current chat
+        // Associate document with chat in storage
         ChatStorageManager.addDocumentToCurrentChat(doc.name, doc.chunks);
 
         if (onNotification) {

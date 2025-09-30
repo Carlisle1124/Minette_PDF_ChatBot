@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import os
 import re
+import uuid
 from typing import List
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
@@ -14,6 +15,7 @@ import json
 from utils.ollama_client import OllamaClient
 from utils.chunker import chunk_text
 from rag_pipeline import RAGPipeline
+from chat_rag_manager import ChatRAGManager
 
 try:
     import pdfplumber  # type: ignore
@@ -32,21 +34,26 @@ app.add_middleware(
 
 ollama = OllamaClient()
 
-# Persist ChromaDB under backend/db/chrome_store regardless of CWD
+# Initialize per-chat RAG management system
 _base_dir = os.path.dirname(__file__)
-_persist_dir = os.path.join(_base_dir, "db", "chrome_store")
+_persist_dir = os.path.join(_base_dir, "db", "chat_contexts")
+_docs_dir = os.path.join(_base_dir, "uploaded_docs")
 try:
-    rag = RAGPipeline(persist_directory=_persist_dir)
-    print("RAG pipeline initialized successfully")
+    chat_rag_manager = ChatRAGManager(_persist_dir, _docs_dir)
+    print("Chat RAG Manager initialized successfully")
 except Exception as e:
-    print(f"Error initializing RAG pipeline: {str(e)}")
-    rag = None
+    print(f"Error initializing Chat RAG Manager: {str(e)}")
+    chat_rag_manager = None
 
 
 class ChatRequest(BaseModel):
     message: str
     top_k: int = 5
+    chat_id: str | None = None  # Chat ID for context switching
     filter_documents: List[str] | None = None  # Optional list of document IDs to filter by
+
+class ChatSwitchRequest(BaseModel):
+    chat_id: str
 
 
 @app.get("/health")
@@ -54,87 +61,137 @@ def health() -> dict:
     return {"status": "ok"}
 
 
+@app.post("/chat/switch")
+def switch_chat(req: ChatSwitchRequest) -> dict:
+    """Switch to a specific chat context"""
+    if chat_rag_manager is None:
+        raise HTTPException(status_code=500, detail="Chat RAG manager not initialized")
+    
+    try:
+        rag = chat_rag_manager.set_current_chat(req.chat_id)
+        docs_info = chat_rag_manager.get_current_chat_documents()
+        return {
+            "message": f"Switched to chat {req.chat_id}",
+            "chat_id": req.chat_id,
+            "documents": docs_info.get("documents", {}),
+            "total_chunks": docs_info.get("total_chunks", 0)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to switch chat: {str(e)}")
+
+
+@app.post("/chat/new")
+def new_chat() -> dict:
+    """Start a new chat (clear current context)"""
+    if chat_rag_manager is None:
+        raise HTTPException(status_code=500, detail="Chat RAG manager not initialized")
+    
+    chat_rag_manager.clear_current_chat()
+    return {"message": "New chat started - no active context"}
+
+
+@app.get("/chat/current")
+def get_current_chat() -> dict:
+    """Get information about current chat context"""
+    if chat_rag_manager is None:
+        raise HTTPException(status_code=500, detail="Chat RAG manager not initialized")
+    
+    if chat_rag_manager.current_chat_id:
+        docs_info = chat_rag_manager.get_current_chat_documents()
+        return {
+            "chat_id": chat_rag_manager.current_chat_id,
+            "has_context": True,
+            "documents": docs_info.get("documents", {}),
+            "total_chunks": docs_info.get("total_chunks", 0)
+        }
+    else:
+        return {
+            "chat_id": None,
+            "has_context": False,
+            "documents": {},
+            "total_chunks": 0
+        }
+
+
 @app.post("/ingest/pdf")
-async def ingest_pdf(file: UploadFile = File(...), replace: bool = False) -> dict:
+async def ingest_pdf(file: UploadFile = File(...), chat_id: str | None = None, replace: bool = False) -> dict:
     if pdfplumber is None:
         raise RuntimeError("pdfplumber is required. Install with: pip install pdfplumber")
+    
+    if chat_rag_manager is None:
+        raise HTTPException(status_code=500, detail="Chat RAG manager not initialized")
 
-    print(f"\n=== INGESTING PDF ===")
+    print(f"\n=== INGESTING PDF TO CHAT ===")
     print(f"Filename: {file.filename}")
+    print(f"Chat ID: {chat_id}")
+    
+    # Set chat context if provided
+    if chat_id:
+        chat_rag_manager.set_current_chat(chat_id)
+    elif not chat_rag_manager.current_chat_id:
+        raise HTTPException(status_code=400, detail="No chat_id provided and no current chat context")
     
     # Only clear existing documents if replace=True
     if replace:
-        print("Replace mode: Auto-clearing existing documents before ingestion...")
-        rag.clear_all_documents()
+        print("Replace mode: Auto-clearing existing documents for current chat...")
+        chat_rag_manager.clear_current_chat_documents()
     
     content = await file.read()
+    # Generate a unique document ID using UUID instead of filename
+    doc_id = f"doc_{uuid.uuid4().hex[:8]}"
     
-    # Save the uploaded file
-    upload_dir = os.path.join(_base_dir, "uploaded_docs")
-    os.makedirs(upload_dir, exist_ok=True)
-    
-    # Clear existing files in upload directory
-    if os.path.exists(upload_dir):
-        for existing_file in os.listdir(upload_dir):
-            existing_path = os.path.join(upload_dir, existing_file)
-            if os.path.isfile(existing_path):
-                os.remove(existing_path)
-                print(f"Removed existing file: {existing_file}")
-    
-    file_path = os.path.join(upload_dir, file.filename or "document.pdf")
-    
-    print(f"Saving file to: {file_path}")
-    
-    with open(file_path, "wb") as f:
-        f.write(content)
+    # Save file to chat-specific folder
+    file_path = chat_rag_manager.save_file_to_current_chat(file.filename or "document.pdf", content)
+    print(f"Saved file to: {file_path}")
     
     # Extract text using pdfplumber
     with pdfplumber.open(io.BytesIO(content)) as pdf:
         pages_text = [page.extract_text() or "" for page in pdf.pages]
     full_text = "\n\n".join(pages_text)
-    doc_id = os.path.splitext(file.filename or "document")[0]
     
     print(f"Document ID: {doc_id}")
     print(f"Text length: {len(full_text)} characters")
     print(f"Text preview: {full_text[:200]}...")
     
-    num_chunks = rag.ingest_document(doc_id=doc_id, text=full_text, metadata={"filename": file.filename})
+    # Ingest to current chat's RAG context
+    num_chunks = chat_rag_manager.ingest_document_to_current_chat(doc_id, full_text, file.filename or "document.pdf")
     
-    print(f"Ingestion complete: {num_chunks} chunks created")
-    print("====================\n")
+    print(f"Ingestion complete: {num_chunks} chunks created for chat {chat_rag_manager.current_chat_id}")
+    print("===============================\n")
     
-    return {"filename": file.filename, "chunks": num_chunks}
+    return {
+        "filename": file.filename,
+        "chunks": num_chunks,
+        "chat_id": chat_rag_manager.current_chat_id,
+        "doc_id": doc_id
+    }
 
 
 @app.post("/ingest/pdf/add")
-async def add_pdf(file: UploadFile = File(...)) -> dict:
+async def add_pdf(file: UploadFile = File(...), chat_id: str | None = None) -> dict:
     if pdfplumber is None:
         raise RuntimeError("pdfplumber is required. Install with: pip install pdfplumber")
+    
+    if chat_rag_manager is None:
+        raise HTTPException(status_code=500, detail="Chat RAG manager not initialized")
 
-    print(f"\n=== ADDING PDF TO CONTEXT ===")
+    print(f"\n=== ADDING PDF TO CHAT CONTEXT ===")
     print(f"Filename: {file.filename}")
+    print(f"Chat ID: {chat_id}")
+    
+    # Set chat context if provided
+    if chat_id:
+        chat_rag_manager.set_current_chat(chat_id)
+    elif not chat_rag_manager.current_chat_id:
+        raise HTTPException(status_code=400, detail="No chat_id provided and no current chat context")
     
     content = await file.read()
+    # Generate a unique document ID using UUID instead of filename
+    doc_id = f"doc_{uuid.uuid4().hex[:8]}"
     
-    # Save the uploaded file
-    upload_dir = os.path.join(_base_dir, "uploaded_docs")
-    os.makedirs(upload_dir, exist_ok=True)
-    
-    file_path = os.path.join(upload_dir, file.filename or "document.pdf")
-    doc_id = os.path.splitext(file.filename or "document")[0]
-    
-    # Check if document already exists in vector store
-    existing_info = rag.get_all_documents_info()
-    existing_docs = existing_info.get("documents", {})
-    
-    if doc_id in existing_docs:
-        print(f"Document {doc_id} already exists in context. Removing existing chunks first...")
-        rag.remove_document(doc_id)
-    
-    print(f"Saving file to: {file_path}")
-    
-    with open(file_path, "wb") as f:
-        f.write(content)
+    # Save file to chat-specific folder
+    file_path = chat_rag_manager.save_file_to_current_chat(file.filename or "document.pdf", content)
+    print(f"Saved file to: {file_path}")
     
     # Extract text using pdfplumber
     with pdfplumber.open(io.BytesIO(content)) as pdf:
@@ -145,33 +202,67 @@ async def add_pdf(file: UploadFile = File(...)) -> dict:
     print(f"Text length: {len(full_text)} characters")
     print(f"Text preview: {full_text[:200]}...")
     
-    num_chunks = rag.ingest_document(doc_id=doc_id, text=full_text, metadata={"filename": file.filename})
+    # Ingest to current chat's RAG context
+    num_chunks = chat_rag_manager.ingest_document_to_current_chat(doc_id, full_text, file.filename or "document.pdf")
     
-    print(f"Addition complete: {num_chunks} chunks added")
+    print(f"Addition complete: {num_chunks} chunks added to chat {chat_rag_manager.current_chat_id}")
     print("===============================\n")
     
-    return {"filename": file.filename, "chunks": num_chunks}
+    return {
+        "filename": file.filename,
+        "chunks": num_chunks,
+        "chat_id": chat_rag_manager.current_chat_id,
+        "doc_id": doc_id
+    }
 
 
 @app.post("/chat")
 def chat(req: ChatRequest) -> dict:
+    if chat_rag_manager is None:
+        raise HTTPException(status_code=500, detail="Chat RAG manager not initialized")
+    
     print(f"\n=== CHAT REQUEST ===")
     print(f"Question: {req.message}")
+    print(f"Chat ID: {req.chat_id}")
     
-    answer, contexts = rag.rag_answer(req.message)
+    # Set chat context if provided
+    if req.chat_id:
+        chat_rag_manager.set_current_chat(req.chat_id)
     
-    print(f"Generated answer length: {len(answer)} characters")
-    print(f"Answer preview: {answer[:200]}...")
-    print(f"Used {len(contexts)} context chunks")
-    print("===================\n")
-
-    return {
-        "answer": answer,
-        "contexts": [
-            {"text": c.text, "score": c.score}
-            for c in contexts
-        ],
-    }
+    if not chat_rag_manager.current_chat_id:
+        raise HTTPException(status_code=400, detail="No active chat context")
+    
+    try:
+        rag = chat_rag_manager.get_current_rag()
+        if not rag:
+            raise HTTPException(status_code=500, detail="No RAG instance for current chat")
+        
+        # Debug: Check if we have any documents in the current chat context
+        docs_info = rag.get_all_documents_info()
+        total_chunks = docs_info.get("total_chunks", 0)
+        print(f"Current chat has {total_chunks} total chunks available for retrieval")
+        
+        if total_chunks == 0:
+            print("WARNING: No documents found in current chat context - AI will have no context to work with")
+        
+        answer, contexts = rag.rag_answer(req.message)
+        
+        print(f"Generated answer length: {len(answer)} characters")
+        print(f"Answer preview: {answer[:200]}...")
+        print(f"Used {len(contexts)} context chunks")
+        print(f"Current chat: {chat_rag_manager.current_chat_id}")
+        print("===================\n")
+        
+        return {
+            "answer": answer,
+            "contexts": [
+                {"text": c.text, "score": c.score}
+                for c in contexts
+            ],
+            "chat_id": chat_rag_manager.current_chat_id,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
 
 
 @app.post("/chat/stream")
@@ -179,20 +270,41 @@ def chat_stream(req: ChatRequest):
     """
     Stream the chat response as Server-Sent Events.
     """
+    if chat_rag_manager is None:
+        raise HTTPException(status_code=500, detail="Chat RAG manager not initialized")
+    
     print(f"\n=== STREAMING CHAT REQUEST ===")
     print(f"Question: {req.message}")
+    print(f"Chat ID: {req.chat_id}")
     print(f"Top K: {req.top_k}")
-    print(f"Filter Documents: {req.filter_documents}")
+    
+    # Set chat context if provided
+    if req.chat_id:
+        chat_rag_manager.set_current_chat(req.chat_id)
+    
+    if not chat_rag_manager.current_chat_id:
+        raise HTTPException(status_code=400, detail="No active chat context")
     
     def generate_stream():
         contexts_sent = False
         full_answer = ""
         
         try:
+            rag = chat_rag_manager.get_current_rag()
+            if not rag:
+                raise Exception("No RAG instance for current chat")
+            
+            # Debug: Check if we have any documents in the current chat context
+            docs_info = rag.get_all_documents_info()
+            total_chunks = docs_info.get("total_chunks", 0)
+            print(f"Streaming chat: Current chat has {total_chunks} total chunks available")
+            
+            if total_chunks == 0:
+                print("WARNING: No documents in current chat context for streaming - AI will have no context")
+                
             for content_chunk, contexts in rag.rag_answer_stream(
                 req.message, 
-                req.top_k, 
-                req.filter_documents
+                req.top_k
             ):
                 full_answer += content_chunk
                 
@@ -242,14 +354,34 @@ def chat_stream(req: ChatRequest):
 
 
 @app.get("/debug/documents")
-def debug_documents() -> dict:
-    """Debug endpoint to see what documents are in the vector store"""
-    print("\n=== DEBUG: Vector Store Contents ===")
-    if rag is None:
-        return {"error": "RAG pipeline not initialized"}
+def debug_documents(chat_id: str | None = None) -> dict:
+    """Debug endpoint to see what documents are in the current or specified chat context"""
+    print("\n=== DEBUG: Chat Documents ===")
+    if chat_rag_manager is None:
+        return {"error": "Chat RAG manager not initialized"}
+    
     try:
-        info = rag.get_all_documents_info()
-        print("====================================\n")
+        if chat_id:
+            # Get documents for specific chat
+            info = chat_rag_manager.get_chat_documents(chat_id)
+            info["chat_id"] = chat_id
+            print(f"Documents for chat {chat_id}: {info}")
+        elif chat_rag_manager.current_chat_id:
+            # Get documents for current chat
+            info = chat_rag_manager.get_current_chat_documents()
+            info["chat_id"] = chat_rag_manager.current_chat_id
+            print(f"Documents for current chat {chat_rag_manager.current_chat_id}: {info}")
+        else:
+            # No chat context
+            info = {
+                "chat_id": None,
+                "documents": {},
+                "total_chunks": 0,
+                "message": "No active chat context"
+            }
+            print("No active chat context")
+        
+        print("============================\n")
         return info
     except Exception as e:
         print(f"Error getting documents info: {str(e)}")
@@ -258,56 +390,107 @@ def debug_documents() -> dict:
 
 @app.delete("/documents/clear")
 async def clear_all_documents() -> dict:
-    print("\n=== CLEAR ALL DOCUMENTS REQUEST ===")
+    if chat_rag_manager is None:
+        raise HTTPException(status_code=500, detail="Chat RAG manager not initialized")
+    
+    print(f"\n=== CLEAR CHAT DOCUMENTS REQUEST ===")
     try:
-        # Clear all files from upload directory
-        upload_dir = os.path.join(_base_dir, "uploaded_docs")
-        print(f"Clearing files from: {upload_dir}")
-        if os.path.exists(upload_dir):
-            files_before = os.listdir(upload_dir)
-            print(f"Files before clearing: {files_before}")
-            for filename in os.listdir(upload_dir):
-                file_path = os.path.join(upload_dir, filename)
-                if os.path.isfile(file_path):
-                    os.remove(file_path)
-                    print(f"Removed file: {filename}")
+        if not chat_rag_manager.current_chat_id:
+            raise HTTPException(status_code=400, detail="No active chat context")
         
-        # Clear the entire vector store
-        print("Clearing vector store...")
-        success = rag.clear_all_documents()
-        print(f"Vector store clear success: {success}")
+        print(f"Clearing all documents from chat {chat_rag_manager.current_chat_id}")
+        
+        success = chat_rag_manager.clear_current_chat_documents()
         
         if success:
-            print("=== CLEAR ALL COMPLETED SUCCESSFULLY ===")
-            return {"message": "All documents successfully cleared"}
+            print(f"=== CLEARED CHAT {chat_rag_manager.current_chat_id} DOCUMENTS ===")
+            return {
+                "message": f"All documents cleared from chat {chat_rag_manager.current_chat_id}",
+                "chat_id": chat_rag_manager.current_chat_id
+            }
         else:
-            print("=== CLEAR ALL FAILED: VECTOR STORE CLEAR FAILED ===")
-            raise HTTPException(status_code=500, detail="Failed to clear vector store")
+            raise HTTPException(status_code=500, detail="Failed to clear chat documents")
     except Exception as e:
-        print(f"=== CLEAR ALL ERROR: {str(e)} ===")
+        print(f"=== CLEAR CHAT ERROR: {str(e)} ===")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.delete("/documents/{filename}")
-async def delete_document(filename: str) -> dict:
+async def delete_document(filename: str, chat_id: str | None = None) -> dict:
+    if chat_rag_manager is None:
+        raise HTTPException(status_code=500, detail="Chat RAG manager not initialized")
+    
     try:
-        # Path where documents are stored
-        file_path = os.path.join(_base_dir, "uploaded_docs", filename)
+        # Set chat context if provided
+        if chat_id:
+            chat_rag_manager.set_current_chat(chat_id)
         
-        # Check if the file exists and delete it
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        if not chat_rag_manager.current_chat_id:
+            raise HTTPException(status_code=400, detail="No active chat context")
         
-        # Remove document from the RAG pipeline/vector store
+        # Remove document from current chat's context
         doc_id = os.path.splitext(filename)[0]
-        success = rag.remove_document(doc_id)
+        success = chat_rag_manager.remove_document_from_current_chat(doc_id)
         
         if success:
-            return {"message": f"Document {filename} successfully deleted"}
+            return {
+                "message": f"Document {filename} successfully deleted from chat {chat_rag_manager.current_chat_id}",
+                "chat_id": chat_rag_manager.current_chat_id
+            }
         else:
-            raise HTTPException(status_code=500, detail=f"Failed to remove {filename} from vector store")
+            raise HTTPException(status_code=500, detail=f"Failed to remove {filename} from chat context")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/debug/test-retrieval")
+def debug_test_retrieval(query: str, chat_id: str | None = None, top_k: int = 3) -> dict:
+    """Debug endpoint to test vector retrieval without full RAG"""
+    if chat_rag_manager is None:
+        raise HTTPException(status_code=500, detail="Chat RAG manager not initialized")
+    
+    print(f"\n=== DEBUG: TESTING RETRIEVAL ===")
+    print(f"Query: {query}")
+    print(f"Chat ID: {chat_id}")
+    print(f"Top K: {top_k}")
+    
+    try:
+        # Set chat context if provided
+        if chat_id:
+            chat_rag_manager.set_current_chat(chat_id)
+        
+        if not chat_rag_manager.current_chat_id:
+            raise HTTPException(status_code=400, detail="No active chat context")
+        
+        rag = chat_rag_manager.get_current_rag()
+        if not rag:
+            raise HTTPException(status_code=500, detail="No RAG instance for current chat")
+        
+        # Test retrieval only
+        contexts = rag.retrieve(query, top_k)
+        
+        print(f"Retrieved {len(contexts)} contexts")
+        for i, context in enumerate(contexts):
+            print(f"  Context {i+1}: score={context.score:.4f}, text_preview='{context.text[:100]}...'")
+        
+        print("================================\n")
+        
+        return {
+            "query": query,
+            "chat_id": chat_rag_manager.current_chat_id,
+            "num_contexts": len(contexts),
+            "contexts": [
+                {
+                    "score": c.score,
+                    "text_preview": c.text[:200] + "..." if len(c.text) > 200 else c.text,
+                    "full_text": c.text
+                }
+                for c in contexts
+            ]
+        }
+    except Exception as e:
+        print(f"Debug retrieval error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Debug retrieval failed: {str(e)}")
 
 
 if __name__ == "__main__":

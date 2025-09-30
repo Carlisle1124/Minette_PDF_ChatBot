@@ -25,9 +25,12 @@ export async function uploadPdf(file: File): Promise<{ filename: string; chunks:
   return res.json();
 }
 
-export async function addPdf(file: File): Promise<{ filename: string; chunks: number }>{
+export async function addPdf(file: File, chatId?: string): Promise<{ filename: string; chunks: number; chat_id: string; doc_id: string }>{
   const form = new FormData();
   form.append("file", file);
+  if (chatId) {
+    form.append("chat_id", chatId);
+  }
 
   const res = await fetch(`${BASE_URL}/ingest/pdf/add`, {
     method: "POST",
@@ -40,11 +43,15 @@ export async function addPdf(file: File): Promise<{ filename: string; chunks: nu
   return res.json();
 }
 
-export async function chat(question: string, topK?: number): Promise<ChatResponse> {
+export async function chat(question: string, chatId?: string, topK?: number): Promise<ChatResponse> {
   const res = await fetch(`${BASE_URL}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message: question, top_k: topK }),
+    body: JSON.stringify({ 
+      message: question, 
+      chat_id: chatId,
+      top_k: topK 
+    }),
   });
   if (!res.ok) {
     const text = await res.text();
@@ -58,14 +65,14 @@ export interface StreamChunk {
   data: any;
 }
 
-export async function* chatStream(question: string, topK?: number, filterDocuments?: string[]): AsyncGenerator<StreamChunk, void, undefined> {
+export async function* chatStream(question: string, chatId?: string, topK?: number): AsyncGenerator<StreamChunk, void, undefined> {
   const res = await fetch(`${BASE_URL}/chat/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ 
       message: question, 
-      top_k: topK,
-      filter_documents: filterDocuments 
+      chat_id: chatId,
+      top_k: topK
     }),
   });
 
@@ -127,9 +134,10 @@ export async function deleteDocument(filename: string): Promise<{ message: strin
   return res.json();
 }
 
-export async function clearAllDocuments(): Promise<{ message: string }> {
-  console.log("API: clearAllDocuments called, BASE_URL:", BASE_URL);
-  const res = await fetch(`${BASE_URL}/documents/clear`, {
+export async function clearAllDocuments(chatId?: string): Promise<{ message: string; chat_id: string }> {
+  console.log("API: clearAllDocuments called, chatId:", chatId, "BASE_URL:", BASE_URL);
+  const url = chatId ? `${BASE_URL}/documents/clear?chat_id=${chatId}` : `${BASE_URL}/documents/clear`;
+  const res = await fetch(url, {
     method: "DELETE",
   });
   console.log("API: fetch response status:", res.status);
@@ -141,6 +149,40 @@ export async function clearAllDocuments(): Promise<{ message: string }> {
   const result = await res.json();
   console.log("API: clearAllDocuments success result:", result);
   return result;
+}
+
+// New chat management functions
+export async function switchChat(chatId: string): Promise<{ message: string; chat_id: string; documents: any; total_chunks: number }> {
+  const res = await fetch(`${BASE_URL}/chat/switch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Switch chat failed (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+export async function newChat(): Promise<{ message: string }> {
+  const res = await fetch(`${BASE_URL}/chat/new`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`New chat failed (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+export async function getCurrentChat(): Promise<{ chat_id: string | null; has_context: boolean; documents: any; total_chunks: number }> {
+  const res = await fetch(`${BASE_URL}/chat/current`);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Get current chat failed (${res.status}): ${text}`);
+  }
+  return res.json();
 }
 
 export interface DocumentInfo {
@@ -204,5 +246,60 @@ export async function checkDocumentsLoaded(filenames: string[]): Promise<{ [file
     console.error("Error checking loaded documents:", error);
     return {};
   }
+}
+
+// Create a new chat context in the backend
+export async function createNewBackendChat(): Promise<{ message: string }> {
+  const res = await fetch(`${BASE_URL}/chat/new`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Create new chat failed (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+// Switch to a specific chat context in the backend
+export async function switchBackendChat(chatId: string): Promise<{ message: string; chat_id: string; documents: any; total_chunks: number }> {
+  const res = await fetch(`${BASE_URL}/chat/switch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Switch chat failed (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+// Get current backend chat context
+export async function getCurrentBackendChat(): Promise<{ chat_id: string | null; has_context: boolean; documents: any; total_chunks: number }> {
+  const res = await fetch(`${BASE_URL}/chat/current`);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Get current chat failed (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+// Debug function to test vector retrieval
+export async function debugTestRetrieval(query: string, chatId?: string, topK: number = 3): Promise<{ query: string; chat_id: string; num_contexts: number; contexts: any[] }> {
+  const res = await fetch(`${BASE_URL}/debug/test-retrieval`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ 
+      query, 
+      chat_id: chatId,
+      top_k: topK 
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Debug test retrieval failed (${res.status}): ${text}`);
+  }
+  return res.json();
 }
 

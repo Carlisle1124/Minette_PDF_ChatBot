@@ -12,6 +12,8 @@ import {
   chatStream,
   fetchDocuments,
   checkDocumentsLoaded,
+  createNewBackendChat,
+  switchBackendChat,
 } from "@/lib/api";
 import { RefreshCw, MessageSquarePlus, MessageSquare } from "lucide-react";
 import ReactMarkdown from "react-markdown";
@@ -99,6 +101,25 @@ export const Chat = ({ onNotification, onDocumentDeleted }: ChatProps) => {
       setCurrentChatId(chatId);
     }
 
+    // Always ensure backend is using the same chat context as frontend
+    try {
+      await switchBackendChat(chatId);
+      console.log(`Backend switched to chat context: ${chatId}`);
+    } catch (backendError) {
+      console.error(
+        `Failed to switch backend to chat ${chatId}:`,
+        backendError
+      );
+      setBusy(false);
+      setErrorState(true);
+      const errorMessage = `Could not establish backend chat context: ${backendError}`;
+      toast.error(errorMessage);
+      if (onNotification) {
+        onNotification("Backend Chat Error", errorMessage, "error");
+      }
+      return;
+    }
+
     const userMessage: ChatMessage = {
       role: "user",
       content: question,
@@ -117,18 +138,10 @@ export const Chat = ({ onNotification, onDocumentDeleted }: ChatProps) => {
       let currentAssistantMessage = "";
       setMessages((m) => [...m, { role: "assistant", content: "" }]);
 
-      // Get documents for current chat to filter queries
-      const currentChatDocuments = chatId
-        ? ChatStorageManager.getChat(chatId)?.documentContext.filenames || []
-        : [];
+      // Use current chat context for the query (backend will handle isolation)
+      console.log("Querying with chat context:", chatId);
 
-      console.log("Querying with document filter:", currentChatDocuments);
-
-      const stream = chatStream(
-        question,
-        undefined,
-        currentChatDocuments.length > 0 ? currentChatDocuments : undefined
-      );
+      const stream = chatStream(question, chatId || undefined);
 
       for await (const chunk of stream) {
         if (chunk.type === "content") {
@@ -227,8 +240,9 @@ export const Chat = ({ onNotification, onDocumentDeleted }: ChatProps) => {
 
   const handleChatSelect = async (chat: ChatHistory) => {
     try {
-      // NOTE: We DO NOT clear documents from vector store anymore
-      // Documents remain persistent and we filter by chat context during queries
+      // Switch backend context to this chat
+      const switchResult = await switchBackendChat(chat.id);
+      console.log("Switched to chat:", switchResult);
 
       // Load the selected chat
       setMessages(
@@ -239,50 +253,18 @@ export const Chat = ({ onNotification, onDocumentDeleted }: ChatProps) => {
       setInput("");
       ChatStorageManager.setCurrentChatId(chat.id);
 
-      // Check if this chat has associated documents
-      const chatDocuments = chat.documentContext.filenames;
-      if (chatDocuments.length > 0) {
-        // Check which documents are still available in the backend
-        const documentStatus = await checkDocumentsLoaded(chatDocuments);
-        const availableDocs = Object.entries(documentStatus)
-          .filter(([_, isLoaded]) => isLoaded)
-          .map(([filename]) => filename);
+      // Show notification about the loaded chat
+      if (onNotification) {
+        const docCount = switchResult.total_chunks;
+        const docFiles = Object.keys(switchResult.documents || {}).length;
 
-        const missingDocs = chatDocuments.filter(
-          (doc) => !availableDocs.includes(doc)
-        );
-
-        if (missingDocs.length > 0) {
-          if (onNotification) {
-            onNotification(
-              "Document Context Warning",
-              `Some documents from this chat are no longer available: ${missingDocs.join(
-                ", "
-              )}. You may need to re-upload them.`,
-              "warning"
-            );
-          }
-        }
-
-        if (availableDocs.length > 0) {
-          if (onNotification) {
-            onNotification(
-              "Chat Loaded",
-              `Loaded chat "${chat.title}" with ${availableDocs.length} document(s) available`,
-              "info"
-            );
-          }
+        if (docFiles > 0) {
+          onNotification(
+            "Chat Loaded",
+            `Loaded chat "${chat.title}" with ${docFiles} document(s) (${docCount} chunks)`,
+            "info"
+          );
         } else {
-          if (onNotification) {
-            onNotification(
-              "Chat Loaded",
-              `Loaded chat "${chat.title}" but documents need to be re-uploaded`,
-              "warning"
-            );
-          }
-        }
-      } else {
-        if (onNotification) {
           onNotification(
             "Chat Loaded",
             `Switched to chat: ${chat.title} (no documents)`,
@@ -309,13 +291,7 @@ export const Chat = ({ onNotification, onDocumentDeleted }: ChatProps) => {
 
   const startNewChat = async () => {
     try {
-      // NOTE: We do NOT clear all documents from vector store anymore
-      // Documents remain persistent across all chats
-
-      // Clear current chat context (but not documents)
-      const oldChatId = currentChatId;
-
-      // Clear chat state
+      // Clear frontend chat state first
       setMessages([]);
       setErrorState(false);
       setInput("");
@@ -325,13 +301,16 @@ export const Chat = ({ onNotification, onDocumentDeleted }: ChatProps) => {
       // Clear current chat in storage
       ChatStorageManager.clearCurrentChatId();
 
+      // Clear backend context (no active chat)
+      await createNewBackendChat();
+
       // Close the dialog
       setShowNewChatDialog(false);
 
       if (onNotification) {
         onNotification(
           "New Chat",
-          "Started a new chat session. Documents remain available for all chats.",
+          "Started a new chat session with fresh document context.",
           "info"
         );
       }
@@ -343,11 +322,11 @@ export const Chat = ({ onNotification, onDocumentDeleted }: ChatProps) => {
     } catch (e: any) {
       console.error(e);
       const errorMessage =
-        "Failed to clear documents: " + (e.message ?? e.toString());
+        "Failed to start new chat: " + (e.message ?? e.toString());
       toast.error(errorMessage);
 
       if (onNotification) {
-        onNotification("Clear failed", errorMessage, "error");
+        onNotification("New Chat failed", errorMessage, "error");
       }
     }
   };

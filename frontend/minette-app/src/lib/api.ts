@@ -123,8 +123,11 @@ export async function* chatStream(question: string, chatId?: string, topK?: numb
   }
 }
 
-export async function deleteDocument(filename: string): Promise<{ message: string }> {
-  const res = await fetch(`${BASE_URL}/documents/${encodeURIComponent(filename)}`, {
+export async function deleteDocument(filename: string, chatId?: string): Promise<{ message: string }> {
+  const url = chatId 
+    ? `${BASE_URL}/documents/${encodeURIComponent(filename)}?chat_id=${chatId}`
+    : `${BASE_URL}/documents/${encodeURIComponent(filename)}`;
+  const res = await fetch(url, {
     method: "DELETE",
   });
   if (!res.ok) {
@@ -299,6 +302,35 @@ export async function debugTestRetrieval(query: string, chatId?: string, topK: n
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Debug test retrieval failed (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+// Delete a chat completely from the backend (documents + embeddings)
+export async function deleteChatFromBackend(chatId: string): Promise<{ message: string; chat_id: string; deleted: boolean }> {
+  const res = await fetch(`${BASE_URL}/chat/${encodeURIComponent(chatId)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Delete chat failed (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+// List all chats from backend with their metadata
+export interface BackendChatInfo {
+  chat_id: string;
+  document_count: number;
+  total_chunks: number;
+  error?: string;
+}
+
+export async function listBackendChats(): Promise<{ chats: BackendChatInfo[]; total: number; current_chat_id: string | null }> {
+  const res = await fetch(`${BASE_URL}/chats`);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`List chats failed (${res.status}): ${text}`);
   }
   return res.json();
 }

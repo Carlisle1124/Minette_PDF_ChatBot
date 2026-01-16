@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { toast } from "sonner";
 import { Separator } from "@/components/ui/separator";
-import { Trash2 } from "lucide-react";
+import { Trash2, Loader2, Upload } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -20,6 +20,7 @@ import {
   fetchDocuments,
   createNewBackendChat,
   switchBackendChat,
+  getCurrentBackendChat,
 } from "@/lib/api";
 import { ChatStorageManager } from "@/lib/chatStorage";
 
@@ -35,11 +36,15 @@ interface DocumentUploaderProps {
     message: string,
     type?: "info" | "success" | "warning" | "error"
   ) => void;
+  onDocumentUploaded?: (chatId: string) => void;
+  currentChatId?: string | null;
 }
 
 export const DocumentUploader = ({
   onDocumentDeleted,
   onNotification,
+  onDocumentUploaded,
+  currentChatId,
 }: DocumentUploaderProps) => {
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
@@ -47,9 +52,72 @@ export const DocumentUploader = ({
   const [deleting, setDeleting] = useState<string | null>(null);
   const [clearingAll, setClearingAll] = useState(false);
   const [showClearAllDialog, setShowClearAllDialog] = useState(false);
+  const [isLoadingDocs, setIsLoadingDocs] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+
+  // Load documents and sync backend when currentChatId changes
+  useEffect(() => {
+    const loadDocumentsForChat = async () => {
+      // If no chat ID, clear the docs list (new chat scenario)
+      if (!currentChatId) {
+        setDocs([]);
+        return;
+      }
+
+      setIsLoadingDocs(true);
+      try {
+        // IMPORTANT: Switch backend to this chat context first
+        // This ensures the backend's vector store is in sync
+        await switchBackendChat(currentChatId);
+        console.log(`Backend switched to chat context: ${currentChatId}`);
+
+        // Get documents from the current chat's storage
+        const chat = ChatStorageManager.getChat(currentChatId);
+        if (chat && chat.documentContext.filenames.length > 0) {
+          // Build docs list from chat's document context
+          const chatDocs: UploadedDoc[] = chat.documentContext.filenames.map(
+            (filename) => ({
+              name: filename,
+              chunks: 0, // We don't store individual chunk counts per file
+            })
+          );
+          setDocs(chatDocs);
+          console.log(
+            `Loaded ${chatDocs.length} documents for chat ${currentChatId}`
+          );
+        } else {
+          // No documents in this chat
+          setDocs([]);
+          console.log(`No documents found for chat ${currentChatId}`);
+        }
+      } catch (error) {
+        console.error("Error loading documents for chat:", error);
+        setDocs([]);
+      } finally {
+        setIsLoadingDocs(false);
+      }
+    };
+
+    loadDocumentsForChat();
+  }, [currentChatId]);
 
   const onFilesSelected = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
+
+    // Validate that all files are PDFs
+    const invalidFiles = Array.from(files).filter(
+      (file) => file.type !== "application/pdf"
+    );
+
+    if (invalidFiles.length > 0) {
+      toast.error(
+        `Only PDF files are allowed. Invalid files: ${invalidFiles
+          .map((f) => f.name)
+          .join(", ")}`
+      );
+      return;
+    }
+
     setLoading(true);
 
     try {
@@ -116,6 +184,11 @@ export const DocumentUploader = ({
             "success"
           );
         }
+
+        // Notify parent that document was uploaded to this chat
+        if (onDocumentUploaded) {
+          onDocumentUploaded(chatId);
+        }
       }
 
       // Note: We don't auto-clear chat when adding documents to existing context
@@ -137,7 +210,8 @@ export const DocumentUploader = ({
   const removeDoc = async (name: string) => {
     setDeleting(name);
     try {
-      await deleteDocument(name);
+      // Pass currentChatId to ensure backend deletes from correct chat context
+      await deleteDocument(name, currentChatId ?? undefined);
       setDocs((d) => d.filter((doc) => doc.name !== name));
 
       // Remove document from current chat's context
@@ -240,59 +314,142 @@ export const DocumentUploader = ({
     }
   };
 
+  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+
+    if (loading || isLoadingDocs) return;
+
+    const files = e.dataTransfer.files;
+    if (files && files.length > 0) {
+      onFilesSelected(files);
+    }
+  };
+
   return (
     <>
-      <Card className="border-muted/50">
-        <CardHeader>
-          <CardTitle>Manage PDFs</CardTitle>
-          <p className="text-sm text-muted-foreground mt-1">
+      <Card className="border-muted/50 relative">
+        {/* Loading overlay when switching chats */}
+        {isLoadingDocs && (
+          <div className="absolute inset-0 bg-background/80 flex items-center justify-center z-10 rounded-lg">
+            <div className="flex items-center gap-2 text-muted-foreground">
+              <Loader2 className="h-5 w-5 animate-spin" />
+              <span>Loading documents...</span>
+            </div>
+          </div>
+        )}
+        <CardHeader className="p-4 sm:p-6">
+          <CardTitle className="text-base sm:text-lg">Manage PDFs</CardTitle>
+          <p className="text-xs sm:text-sm text-muted-foreground mt-1">
             Add PDFs to the AI's context. Multiple documents can be added to
             provide richer context for your questions.
+            {currentChatId && (
+              <span className="block text-xs mt-1 opacity-70">
+                Chat: {currentChatId.substring(0, 8)}...
+              </span>
+            )}
           </p>
         </CardHeader>
-        <CardContent className="flex flex-col gap-4">
-          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+        <CardContent className="flex flex-col gap-4 p-4 sm:p-6 pt-0 sm:pt-0">
+          {/* Drag and Drop Zone */}
+          <div
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            className={`
+              relative border-2 border-dashed rounded-lg p-6 transition-all duration-200
+              ${
+                isDragging
+                  ? "border-primary bg-primary/5 scale-[1.02]"
+                  : "border-muted-foreground/25 hover:border-muted-foreground/50"
+              }
+              ${
+                loading || isLoadingDocs
+                  ? "opacity-50 cursor-not-allowed"
+                  : "cursor-pointer"
+              }
+            `}
+          >
             <input
               type="file"
               accept="application/pdf"
               multiple
               onChange={(e) => onFilesSelected(e.target.files)}
-              disabled={loading}
+              disabled={loading || isLoadingDocs}
+              className="absolute inset-0 w-full h-full opacity-0 cursor-pointer disabled:cursor-not-allowed z-10"
+              id="pdf-upload-input"
             />
-            <Button variant="secondary" disabled>
-              {loading ? status ?? "Processing..." : "Choose files"}
-            </Button>
+            <div className="flex flex-col items-center justify-center gap-3 text-center pointer-events-none">
+              <div className="p-3 rounded-full bg-primary/10">
+                {loading ? (
+                  <Loader2 className="h-8 w-8 text-primary animate-spin" />
+                ) : (
+                  <Upload className="h-8 w-8 text-primary" />
+                )}
+              </div>
+              <div>
+                <p className="text-sm font-medium mb-1">
+                  {loading ? (
+                    status ?? "Processing..."
+                  ) : isDragging ? (
+                    "Drop PDF files here"
+                  ) : (
+                    <>
+                      <span className="text-primary">Click me to upload</span>{" "}
+                      or drag and drop
+                    </>
+                  )}
+                </p>
+                <p className="text-xs text-muted-foreground">PDF files only</p>
+              </div>
+            </div>
           </div>
 
           <Separator />
 
           {docs.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              No PDFs uploaded yet.
-            </p>
+            <></>
           ) : (
             <>
-              <div className="flex justify-between items-center mb-2">
-                <span className="text-sm font-medium">Uploaded Documents:</span>
+              <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-2 mb-2">
+                <span className="text-xs sm:text-sm font-medium">
+                  Uploaded Documents ({docs.length}):
+                </span>
                 <Button
                   variant="outline"
                   size="sm"
                   onClick={() => setShowClearAllDialog(true)}
                   disabled={clearingAll || loading}
-                  className="text-destructive hover:text-destructive"
+                  className="text-destructive hover:text-destructive text-xs sm:text-sm h-8 w-full sm:w-auto"
                 >
-                  {clearingAll ? "Clearing..." : "Clear Chat Documents"}
+                  <Trash2 className="h-3.5 w-3.5 mr-1.5" />
+                  {clearingAll ? "Clearing..." : "Clear All"}
                 </Button>
               </div>
-              <ul className="space-y-2">
+              <ul className="space-y-2 max-h-[200px] overflow-y-auto">
                 {docs.map(({ name, chunks }) => (
                   <li
                     key={name}
-                    className="flex items-center justify-between rounded-md border p-2"
+                    className="flex items-center justify-between rounded-md border p-2 sm:p-3 gap-2"
                   >
-                    <div className="truncate pr-2">
-                      <span className="font-medium">{name}</span>
-                      <span className="text-muted-foreground text-sm ml-2">
+                    <div className="truncate min-w-0 flex-1">
+                      <span className="font-medium text-xs sm:text-sm block truncate">
+                        {name}
+                      </span>
+                      <span className="text-muted-foreground text-xs">
                         {chunks} chunks
                       </span>
                     </div>
@@ -301,9 +458,12 @@ export const DocumentUploader = ({
                       size="sm"
                       onClick={() => removeDoc(name)}
                       disabled={deleting === name || loading || clearingAll}
+                      className="h-8 w-8 sm:h-9 sm:w-auto sm:px-3 shrink-0"
                     >
                       <Trash2 className="h-4 w-4" />
-                      {deleting === name && <span className="ml-1">...</span>}
+                      <span className="hidden sm:inline ml-1">
+                        {deleting === name ? "..." : "Remove"}
+                      </span>
                     </Button>
                   </li>
                 ))}
@@ -314,7 +474,7 @@ export const DocumentUploader = ({
       </Card>
 
       <Dialog open={showClearAllDialog} onOpenChange={setShowClearAllDialog}>
-        <DialogContent>
+        <DialogContent className="max-w-[90vw] sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>Clear Current Chat Documents</DialogTitle>
             <DialogDescription>
@@ -323,11 +483,12 @@ export const DocumentUploader = ({
               documents in other chats.
             </DialogDescription>
           </DialogHeader>
-          <DialogFooter>
+          <DialogFooter className="flex-col sm:flex-row gap-2">
             <Button
               variant="outline"
               onClick={() => setShowClearAllDialog(false)}
               disabled={clearingAll}
+              className="w-full sm:w-auto"
             >
               Cancel
             </Button>
@@ -338,8 +499,9 @@ export const DocumentUploader = ({
                 await clearAllDocs();
               }}
               disabled={clearingAll}
+              className="w-full sm:w-auto"
             >
-              {clearingAll ? "Clearing..." : "Yes, Clear Chat Documents"}
+              {clearingAll ? "Clearing..." : "Yes, Clear Documents"}
             </Button>
           </DialogFooter>
         </DialogContent>

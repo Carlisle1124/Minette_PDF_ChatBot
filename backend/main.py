@@ -353,6 +353,66 @@ def chat_stream(req: ChatRequest):
     )
 
 
+@app.get("/chats")
+def list_all_chats() -> dict:
+    """List all available chat sessions with their metadata"""
+    if chat_rag_manager is None:
+        raise HTTPException(status_code=500, detail="Chat RAG manager not initialized")
+    
+    try:
+        chat_ids = chat_rag_manager.list_all_chats()
+        chats_info = []
+        
+        for chat_id in chat_ids:
+            try:
+                docs_info = chat_rag_manager.get_chat_documents(chat_id)
+                chats_info.append({
+                    "chat_id": chat_id,
+                    "document_count": len(docs_info.get("documents", {})),
+                    "total_chunks": docs_info.get("total_chunks", 0)
+                })
+            except Exception as e:
+                chats_info.append({
+                    "chat_id": chat_id,
+                    "document_count": 0,
+                    "total_chunks": 0,
+                    "error": str(e)
+                })
+        
+        return {
+            "chats": chats_info,
+            "total": len(chats_info),
+            "current_chat_id": chat_rag_manager.current_chat_id
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list chats: {str(e)}")
+
+
+@app.delete("/chat/{chat_id}")
+def delete_chat(chat_id: str) -> dict:
+    """Completely delete a chat and all its associated data (documents, embeddings)"""
+    if chat_rag_manager is None:
+        raise HTTPException(status_code=500, detail="Chat RAG manager not initialized")
+    
+    print(f"\n=== DELETING CHAT: {chat_id} ===")
+    
+    try:
+        success = chat_rag_manager.delete_chat_completely(chat_id)
+        
+        if success:
+            print(f"Successfully deleted chat {chat_id} and all its data")
+            return {
+                "message": f"Chat {chat_id} and all associated data deleted successfully",
+                "chat_id": chat_id,
+                "deleted": True
+            }
+        else:
+            raise HTTPException(status_code=500, detail=f"Failed to delete chat {chat_id}")
+    except Exception as e:
+        print(f"Error deleting chat {chat_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete chat: {str(e)}")
+
+
 @app.get("/debug/documents")
 def debug_documents(chat_id: str | None = None) -> dict:
     """Debug endpoint to see what documents are in the current or specified chat context"""
@@ -428,17 +488,35 @@ async def delete_document(filename: str, chat_id: str | None = None) -> dict:
         if not chat_rag_manager.current_chat_id:
             raise HTTPException(status_code=400, detail="No active chat context")
         
-        # Remove document from current chat's context
-        doc_id = os.path.splitext(filename)[0]
-        success = chat_rag_manager.remove_document_from_current_chat(doc_id)
+        # Find the doc_id by filename from vector store metadata
+        rag = chat_rag_manager.get_current_rag()
+        if not rag:
+            raise HTTPException(status_code=500, detail="No RAG pipeline for current chat")
+        
+        docs_info = rag.get_all_documents_info()
+        doc_id_to_delete = None
+        
+        # Search for the doc_id that matches this filename
+        for doc_id, doc_data in docs_info.get("documents", {}).items():
+            if doc_data.get("filename") == filename:
+                doc_id_to_delete = doc_id
+                break
+        
+        if not doc_id_to_delete:
+            raise HTTPException(status_code=404, detail=f"Document '{filename}' not found in vector store")
+        
+        # Remove document using the actual doc_id
+        success = chat_rag_manager.remove_document_from_current_chat(doc_id_to_delete)
         
         if success:
             return {
-                "message": f"Document {filename} successfully deleted from chat {chat_rag_manager.current_chat_id}",
+                "message": f"Document {filename} (doc_id: {doc_id_to_delete}) successfully deleted from chat {chat_rag_manager.current_chat_id}",
                 "chat_id": chat_rag_manager.current_chat_id
             }
         else:
             raise HTTPException(status_code=500, detail=f"Failed to remove {filename} from chat context")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

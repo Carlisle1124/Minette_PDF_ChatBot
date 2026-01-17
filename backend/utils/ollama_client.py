@@ -44,13 +44,16 @@ class OllamaClient:
         return embedding  # type: ignore[return-value]
 
     # --- Chat Completion ---
-    def chat(self, messages: List[Dict[str, str]], temperature: float = 0.2) -> str:
+    def chat(self, messages: List[Dict[str, str]], temperature: float = 0.2, max_tokens: Optional[int] = None) -> str:
         url = f"{self.base_url}/api/chat"
+        options: Dict[str, object] = {"temperature": temperature}
+        if max_tokens is not None:
+            options["num_predict"] = max_tokens
         payload: Dict[str, object] = {
             "model": self.chat_model,
             "messages": messages,
             "stream": False,
-            "options": {"temperature": temperature},
+            "options": options,
         }
         resp = requests.post(url, json=payload, timeout=self.timeout)
         resp.raise_for_status()
@@ -65,7 +68,7 @@ class OllamaClient:
             raise RuntimeError("Unexpected chat response from Ollama")
         return content
 
-    def chat_stream(self, messages: List[Dict[str, str]], temperature: float = 0.2):
+    def chat_stream(self, messages: List[Dict[str, str]], temperature: float = 0.2, max_tokens: Optional[int] = None):
         """
         Stream chat completion responses from Ollama.
         Yields partial content as it becomes available.
@@ -73,11 +76,14 @@ class OllamaClient:
         import json
         
         url = f"{self.base_url}/api/chat"
+        options: Dict[str, object] = {"temperature": temperature}
+        if max_tokens is not None:
+            options["num_predict"] = max_tokens
         payload: Dict[str, object] = {
             "model": self.chat_model,
             "messages": messages,
             "stream": True,
-            "options": {"temperature": temperature},
+            "options": options,
         }
         
         with requests.post(url, json=payload, timeout=self.timeout, stream=True) as resp:

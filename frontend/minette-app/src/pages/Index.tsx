@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Chat } from "@/components/rag/Chat";
-import { ThemeToggle } from "@/components/theme/ThemeToggle";
+import { SettingsPanel } from "@/components/ui/settings-panel";
 import {
   NotificationsButton,
   type Notification,
@@ -151,13 +151,13 @@ const Index = () => {
           >
             Debug
           </Link>
+          <SettingsPanel />
           <NotificationsButton
             notifications={notifications}
             onMarkAsRead={markAsRead}
             onClearAll={clearAllNotifications}
             onClearIndividual={clearIndividualNotification}
           />
-          <ThemeToggle />
         </div>
       </header>
       <Chat

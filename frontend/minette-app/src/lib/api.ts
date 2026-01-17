@@ -43,14 +43,15 @@ export async function addPdf(file: File, chatId?: string): Promise<{ filename: s
   return res.json();
 }
 
-export async function chat(question: string, chatId?: string, topK?: number): Promise<ChatResponse> {
+export async function chat(question: string, chatId?: string, topK?: number, maxTokens?: number): Promise<ChatResponse> {
   const res = await fetch(`${BASE_URL}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ 
       message: question, 
       chat_id: chatId,
-      top_k: topK 
+      top_k: topK,
+      max_tokens: maxTokens
     }),
   });
   if (!res.ok) {
@@ -65,14 +66,15 @@ export interface StreamChunk {
   data: any;
 }
 
-export async function* chatStream(question: string, chatId?: string, topK?: number): AsyncGenerator<StreamChunk, void, undefined> {
+export async function* chatStream(question: string, chatId?: string, topK?: number, maxTokens?: number): AsyncGenerator<StreamChunk, void, undefined> {
   const res = await fetch(`${BASE_URL}/chat/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ 
       message: question, 
       chat_id: chatId,
-      top_k: topK
+      top_k: topK,
+      max_tokens: maxTokens
     }),
   });
 

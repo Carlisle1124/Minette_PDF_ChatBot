@@ -51,6 +51,7 @@ class ChatRequest(BaseModel):
     top_k: int = 5
     chat_id: str | None = None  # Chat ID for context switching
     filter_documents: List[str] | None = None  # Optional list of document IDs to filter by
+    max_tokens: int | None = None  # Maximum tokens for response generation
 
 class ChatSwitchRequest(BaseModel):
     chat_id: str
@@ -224,6 +225,7 @@ def chat(req: ChatRequest) -> dict:
     print(f"\n=== CHAT REQUEST ===")
     print(f"Question: {req.message}")
     print(f"Chat ID: {req.chat_id}")
+    print(f"Max Tokens: {req.max_tokens}")
     
     # Set chat context if provided
     if req.chat_id:
@@ -245,7 +247,7 @@ def chat(req: ChatRequest) -> dict:
         if total_chunks == 0:
             print("WARNING: No documents found in current chat context - AI will have no context to work with")
         
-        answer, contexts = rag.rag_answer(req.message)
+        answer, contexts = rag.rag_answer(req.message, max_tokens=req.max_tokens)
         
         print(f"Generated answer length: {len(answer)} characters")
         print(f"Answer preview: {answer[:200]}...")
@@ -277,6 +279,7 @@ def chat_stream(req: ChatRequest):
     print(f"Question: {req.message}")
     print(f"Chat ID: {req.chat_id}")
     print(f"Top K: {req.top_k}")
+    print(f"Max Tokens: {req.max_tokens}")
     
     # Set chat context if provided
     if req.chat_id:
@@ -304,7 +307,8 @@ def chat_stream(req: ChatRequest):
                 
             for content_chunk, contexts in rag.rag_answer_stream(
                 req.message, 
-                req.top_k
+                req.top_k,
+                max_tokens=req.max_tokens
             ):
                 full_answer += content_chunk
                 

@@ -43,6 +43,7 @@ import {
   ChatMessage,
 } from "@/lib/chatStorage";
 import { ChatHistorySidebar } from "./ChatHistorySidebar";
+import { useSettings } from "@/lib/settingsStorage";
 
 interface Message {
   role: "user" | "assistant";
@@ -134,6 +135,7 @@ export const Chat = ({ onNotification, onDocumentDeleted }: ChatProps) => {
   const [isSwitchingChat, setIsSwitchingChat] = useState(false);
   const [chatHistoryOpen, setChatHistoryOpen] = useState(false);
 
+  const { settings } = useSettings();
   const listRef = useRef<HTMLDivElement>(null);
 
   // Load current chat on component mount
@@ -229,9 +231,19 @@ export const Chat = ({ onNotification, onDocumentDeleted }: ChatProps) => {
       ]);
 
       // Use current chat context for the query (backend will handle isolation)
-      console.log("Querying with chat context:", chatId);
+      console.log(
+        "Querying with chat context:",
+        chatId,
+        "maxTokens:",
+        settings.maxTokens
+      );
 
-      const stream = chatStream(question, chatId || undefined);
+      const stream = chatStream(
+        question,
+        chatId || undefined,
+        undefined,
+        settings.maxTokens
+      );
 
       for await (const chunk of stream) {
         if (chunk.type === "content") {

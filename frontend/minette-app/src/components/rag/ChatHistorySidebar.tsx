@@ -95,9 +95,9 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
           (chat) =>
             chat.title.toLowerCase().includes(query) ||
             chat.messages.some((msg) =>
-              msg.content.toLowerCase().includes(query)
-            )
-        )
+              msg.content.toLowerCase().includes(query),
+            ),
+        ),
       );
     }
   }, [searchQuery, chats]);
@@ -111,7 +111,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
   const handleDeleteClick = (
     chatId: string,
     chatTitle: string,
-    e?: React.MouseEvent
+    e?: React.MouseEvent,
   ) => {
     e?.stopPropagation();
     setChatToDelete(chatId);
@@ -202,7 +202,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
 
       loadChats();
       toast.success(
-        `${deletedCount} chat${deletedCount !== 1 ? "s" : ""} deleted`
+        `${deletedCount} chat${deletedCount !== 1 ? "s" : ""} deleted`,
       );
 
       if (hasCurrentChat && onChatDeleted) {
@@ -228,7 +228,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
     if (editingTitle.trim()) {
       const success = ChatStorageManager.renameChat(
         chatId,
-        editingTitle.trim()
+        editingTitle.trim(),
       );
       if (success) {
         loadChats();
@@ -249,7 +249,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
   const formatDate = (date: Date) => {
     const now = new Date();
     const diffInDays = Math.floor(
-      (now.getTime() - date.getTime()) / (1000 * 60 * 60 * 24)
+      (now.getTime() - date.getTime()) / (1000 * 60 * 60 * 24),
     );
 
     if (diffInDays === 0) {
@@ -428,7 +428,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
                           : "bg-card hover:bg-muted/30",
                         selectionMode &&
                           selectedChats.has(chat.id) &&
-                          "bg-primary/10 border-primary/40"
+                          "bg-primary/10 border-primary/40",
                       )}
                       onClick={() => {
                         if (selectionMode) {

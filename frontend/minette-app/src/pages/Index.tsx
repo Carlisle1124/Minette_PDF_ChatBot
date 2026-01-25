@@ -14,7 +14,7 @@ const FloatingLogo = () => {
   const [direction, setDirection] = useState({ dx: 1, dy: 1 });
   const [isHovered, setIsHovered] = useState(false);
   const [clickEffect, setClickEffect] = useState<"none" | "glow" | "shake">(
-    "none"
+    "none",
   );
 
   useEffect(() => {
@@ -97,7 +97,7 @@ const Index = () => {
   const addNotification = (
     title: string,
     message: string,
-    type: "info" | "success" | "warning" | "error" = "info"
+    type: "info" | "success" | "warning" | "error" = "info",
   ) => {
     const newNotification: Notification = {
       id: uuidv4(),
@@ -114,8 +114,8 @@ const Index = () => {
   const markAsRead = (id: string) => {
     setNotifications((prev) =>
       prev.map((notification) =>
-        notification.id === id ? { ...notification, read: true } : notification
-      )
+        notification.id === id ? { ...notification, read: true } : notification,
+      ),
     );
   };
 
@@ -127,7 +127,7 @@ const Index = () => {
   // Clear individual notification
   const clearIndividualNotification = (id: string) => {
     setNotifications((prev) =>
-      prev.filter((notification) => notification.id !== id)
+      prev.filter((notification) => notification.id !== id),
     );
   };
 
@@ -135,7 +135,7 @@ const Index = () => {
     // Additional handling if needed when documents are deleted
   };
   return (
-    <main className="container px-4 sm:px-6 py-4 sm:py-6 space-y-4 sm:space-y-6 max-w-full sm:max-w-none">
+    <main className="container mx-auto px-4 sm:px-6 lg:px-8 py-4 sm:py-6 space-y-4 sm:space-y-6 max-w-full lg:max-w-7xl xl:max-w-[1400px]">
       <header className="flex items-center justify-between gap-4">
         <div className="w-24 sm:w-32"></div>
         <div className="flex items-center gap-3 bg-purple-100/80 dark:bg-transparent px-4 py-2 rounded-xl shadow-sm dark:shadow-none">

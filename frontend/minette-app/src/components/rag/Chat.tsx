@@ -55,7 +55,7 @@ interface ChatProps {
   onNotification?: (
     title: string,
     message: string,
-    type?: "info" | "success" | "warning" | "error"
+    type?: "info" | "success" | "warning" | "error",
   ) => void;
   onDocumentDeleted?: () => void;
 }
@@ -146,7 +146,10 @@ export const Chat = ({ onNotification, onDocumentDeleted }: ChatProps) => {
       if (chat) {
         setCurrentChatId(currentId);
         setMessages(
-          chat.messages.map((msg) => ({ role: msg.role, content: msg.content }))
+          chat.messages.map((msg) => ({
+            role: msg.role,
+            content: msg.content,
+          })),
         );
       }
     }
@@ -193,7 +196,7 @@ export const Chat = ({ onNotification, onDocumentDeleted }: ChatProps) => {
     } catch (backendError) {
       console.error(
         `Failed to switch backend to chat ${chatId}:`,
-        backendError
+        backendError,
       );
       setBusy(false);
       setErrorState(true);
@@ -235,14 +238,14 @@ export const Chat = ({ onNotification, onDocumentDeleted }: ChatProps) => {
         "Querying with chat context:",
         chatId,
         "maxTokens:",
-        settings.maxTokens
+        settings.maxTokens,
       );
 
       const stream = chatStream(
         question,
         chatId || undefined,
         undefined,
-        settings.maxTokens
+        settings.maxTokens,
       );
 
       for await (const chunk of stream) {
@@ -287,7 +290,7 @@ export const Chat = ({ onNotification, onDocumentDeleted }: ChatProps) => {
         onNotification(
           "Response received",
           "AI has successfully responded to your query",
-          "success"
+          "success",
         );
       }
     } catch (e: any) {
@@ -335,7 +338,7 @@ export const Chat = ({ onNotification, onDocumentDeleted }: ChatProps) => {
       onNotification(
         "Chat Reset",
         "Chat history cleared due to document changes",
-        "info"
+        "info",
       );
     }
   };
@@ -362,7 +365,7 @@ export const Chat = ({ onNotification, onDocumentDeleted }: ChatProps) => {
           role: msg.role,
           content: msg.content,
           timestamp: msg.timestamp,
-        }))
+        })),
       );
       setCurrentChatId(chat.id);
       setErrorState(false);
@@ -378,13 +381,13 @@ export const Chat = ({ onNotification, onDocumentDeleted }: ChatProps) => {
           onNotification(
             "Chat Loaded",
             `Loaded chat "${chat.title}" with ${docFiles} document(s) (${docCount} chunks)`,
-            "info"
+            "info",
           );
         } else {
           onNotification(
             "Chat Loaded",
             `Switched to chat: ${chat.title} (no documents)`,
-            "info"
+            "info",
           );
         }
       }
@@ -399,7 +402,7 @@ export const Chat = ({ onNotification, onDocumentDeleted }: ChatProps) => {
         onNotification(
           "Chat Switch Error",
           "Failed to switch chat context. Please try again.",
-          "error"
+          "error",
         );
       }
     } finally {
@@ -420,7 +423,7 @@ export const Chat = ({ onNotification, onDocumentDeleted }: ChatProps) => {
       onNotification(
         "Chat Deleted",
         "The current chat was deleted. Start a new conversation.",
-        "info"
+        "info",
       );
     }
 
@@ -451,7 +454,7 @@ export const Chat = ({ onNotification, onDocumentDeleted }: ChatProps) => {
         onNotification(
           "New Chat",
           "Started a new chat session with fresh document context.",
-          "info"
+          "info",
         );
       }
 
@@ -558,10 +561,10 @@ export const Chat = ({ onNotification, onDocumentDeleted }: ChatProps) => {
                 messages.length === 0
                   ? ""
                   : messages.length <= 2
-                  ? "min-h-[180px] max-h-[32vh]"
-                  : messages.length <= 4
-                  ? "min-h-[220px] max-h-[42vh]"
-                  : "min-h-[280px] max-h-[52vh] sm:max-h-[62vh]"
+                    ? "min-h-[180px] max-h-[32vh]"
+                    : messages.length <= 4
+                      ? "min-h-[220px] max-h-[42vh]"
+                      : "min-h-[280px] max-h-[52vh] sm:max-h-[62vh]"
               }`}
             >
               {messages.length === 0 ? (

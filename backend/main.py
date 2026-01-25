@@ -138,6 +138,8 @@ async def ingest_pdf(file: UploadFile = File(...), chat_id: str | None = None, r
         chat_rag_manager.clear_current_chat_documents()
     
     content = await file.read()
+    print(f"File content size: {len(content)} bytes")
+    
     # Generate a unique document ID using UUID instead of filename
     doc_id = f"doc_{uuid.uuid4().hex[:8]}"
     
@@ -146,13 +148,28 @@ async def ingest_pdf(file: UploadFile = File(...), chat_id: str | None = None, r
     print(f"Saved file to: {file_path}")
     
     # Extract text using pdfplumber
-    with pdfplumber.open(io.BytesIO(content)) as pdf:
-        pages_text = [page.extract_text() or "" for page in pdf.pages]
-    full_text = "\n\n".join(pages_text)
+    try:
+        with pdfplumber.open(io.BytesIO(content)) as pdf:
+            print(f"PDF has {len(pdf.pages)} pages")
+            pages_text = []
+            for i, page in enumerate(pdf.pages):
+                page_text = page.extract_text() or ""
+                print(f"Page {i+1} extracted {len(page_text)} characters")
+                pages_text.append(page_text)
+        full_text = "\n\n".join(pages_text)
+    except Exception as e:
+        print(f"Error extracting text from PDF: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to extract text from PDF: {str(e)}")
     
     print(f"Document ID: {doc_id}")
-    print(f"Text length: {len(full_text)} characters")
+    print(f"Total text length: {len(full_text)} characters")
     print(f"Text preview: {full_text[:200]}...")
+    
+    if len(full_text.strip()) == 0:
+        raise HTTPException(
+            status_code=400, 
+            detail="PDF appears to be empty or contains only images. Please ensure the PDF contains extractable text."
+        )
     
     # Ingest to current chat's RAG context
     num_chunks = chat_rag_manager.ingest_document_to_current_chat(doc_id, full_text, file.filename or "document.pdf")
@@ -187,6 +204,8 @@ async def add_pdf(file: UploadFile = File(...), chat_id: str | None = None) -> d
         raise HTTPException(status_code=400, detail="No chat_id provided and no current chat context")
     
     content = await file.read()
+    print(f"File content size: {len(content)} bytes")
+    
     # Generate a unique document ID using UUID instead of filename
     doc_id = f"doc_{uuid.uuid4().hex[:8]}"
     
@@ -195,13 +214,28 @@ async def add_pdf(file: UploadFile = File(...), chat_id: str | None = None) -> d
     print(f"Saved file to: {file_path}")
     
     # Extract text using pdfplumber
-    with pdfplumber.open(io.BytesIO(content)) as pdf:
-        pages_text = [page.extract_text() or "" for page in pdf.pages]
-    full_text = "\n\n".join(pages_text)
+    try:
+        with pdfplumber.open(io.BytesIO(content)) as pdf:
+            print(f"PDF has {len(pdf.pages)} pages")
+            pages_text = []
+            for i, page in enumerate(pdf.pages):
+                page_text = page.extract_text() or ""
+                print(f"Page {i+1} extracted {len(page_text)} characters")
+                pages_text.append(page_text)
+        full_text = "\n\n".join(pages_text)
+    except Exception as e:
+        print(f"Error extracting text from PDF: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to extract text from PDF: {str(e)}")
     
     print(f"Document ID: {doc_id}")
-    print(f"Text length: {len(full_text)} characters")
+    print(f"Total text length: {len(full_text)} characters")
     print(f"Text preview: {full_text[:200]}...")
+    
+    if len(full_text.strip()) == 0:
+        raise HTTPException(
+            status_code=400, 
+            detail="PDF appears to be empty or contains only images. Please ensure the PDF contains extractable text."
+        )
     
     # Ingest to current chat's RAG context
     num_chunks = chat_rag_manager.ingest_document_to_current_chat(doc_id, full_text, file.filename or "document.pdf")

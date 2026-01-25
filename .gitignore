@@ -282,6 +282,9 @@ chroma.sqlite3
 chrome_store/
 chroma_store/
 
+# Uploaded documents
+uploaded_docs/
+
 # Model files and checkpoints
 *.model
 *.bin

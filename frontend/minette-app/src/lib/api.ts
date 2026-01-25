@@ -10,11 +10,16 @@ export interface ChatResponse {
 
 const BASE_URL = (import.meta as any).env?.VITE_BACKEND_URL ?? "http://localhost:8000";
 
-export async function uploadPdf(file: File): Promise<{ filename: string; chunks: number }>{
+export async function uploadPdf(file: File, chatId?: string): Promise<{ filename: string; chunks: number }>{
   const form = new FormData();
   form.append("file", file);
+  
+  // Build URL with optional chat_id and replace parameters
+  const url = chatId
+    ? `${BASE_URL}/ingest/pdf?chat_id=${encodeURIComponent(chatId)}&replace=true`
+    : `${BASE_URL}/ingest/pdf?replace=true`;
 
-  const res = await fetch(`${BASE_URL}/ingest/pdf`, {
+  const res = await fetch(url, {
     method: "POST",
     body: form,
   });
@@ -28,11 +33,13 @@ export async function uploadPdf(file: File): Promise<{ filename: string; chunks:
 export async function addPdf(file: File, chatId?: string): Promise<{ filename: string; chunks: number; chat_id: string; doc_id: string }>{
   const form = new FormData();
   form.append("file", file);
-  if (chatId) {
-    form.append("chat_id", chatId);
-  }
+  
+  // Build URL with chat_id as query parameter
+  const url = chatId 
+    ? `${BASE_URL}/ingest/pdf/add?chat_id=${encodeURIComponent(chatId)}`
+    : `${BASE_URL}/ingest/pdf/add`;
 
-  const res = await fetch(`${BASE_URL}/ingest/pdf/add`, {
+  const res = await fetch(url, {
     method: "POST",
     body: form,
   });

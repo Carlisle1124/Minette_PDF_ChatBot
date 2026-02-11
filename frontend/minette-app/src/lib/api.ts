@@ -344,3 +344,122 @@ export async function listBackendChats(): Promise<{ chats: BackendChatInfo[]; to
   return res.json();
 }
 
+// ============================================
+// Model Download Management API
+// ============================================
+
+export interface ModelInfo {
+  model_id: string;
+  repo_id: string;
+  filename: string;
+  local_path: string | null;
+  size_bytes: number | null;
+  status: 'pending' | 'downloading' | 'completed' | 'failed' | 'cancelled';
+  progress: number;
+  error?: string | null;
+}
+
+export interface ModelSearchResult {
+  model_id: string;
+  downloads: number;
+  likes: number;
+  tags: string[];
+  pipeline_tag: string | null;
+  library_name: string | null;
+}
+
+export async function listModels(): Promise<{ models: ModelInfo[]; total: number }> {
+  const res = await fetch(`${BASE_URL}/models`);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`List models failed (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+export async function getModel(modelId: string): Promise<ModelInfo> {
+  const res = await fetch(`${BASE_URL}/models/${encodeURIComponent(modelId)}`);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Get model failed (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+export async function downloadModel(
+  repoId: string,
+  filename: string,
+  modelId?: string
+): Promise<{ message: string; model_id: string; local_path: string; size_bytes: number; status: string }> {
+  const res = await fetch(`${BASE_URL}/models/download`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      repo_id: repoId,
+      filename: filename,
+      model_id: modelId
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Download model failed (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+export async function deleteModel(modelId: string): Promise<{ message: string; model_id: string; deleted: boolean }> {
+  const res = await fetch(`${BASE_URL}/models/${encodeURIComponent(modelId)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Delete model failed (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+export async function getModelStatus(modelId: string): Promise<{
+  model_id: string;
+  progress: number;
+  downloaded_bytes: number;
+  total_bytes: number;
+  status: string;
+  error: string | null;
+}> {
+  const res = await fetch(`${BASE_URL}/models/${encodeURIComponent(modelId)}/status`);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Get model status failed (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+export async function searchModels(
+  query: string,
+  limit: number = 10,
+  task?: string
+): Promise<{ query: string; results: ModelSearchResult[]; total: number }> {
+  const res = await fetch(`${BASE_URL}/models/search`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      query: query,
+      limit: limit,
+      task: task
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Search models failed (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+export async function listRepoFiles(repoId: string): Promise<{ repo_id: string; files: string[]; total: number }> {
+  const res = await fetch(`${BASE_URL}/models/repo/${encodeURIComponent(repoId)}/files`);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`List repo files failed (${res.status}): ${text}`);
+  }
+  return res.json();
+}

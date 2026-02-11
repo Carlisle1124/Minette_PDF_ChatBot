@@ -22,6 +22,12 @@ try:
 except Exception:
     pdfplumber = None
 
+try:
+    from model_manager import ModelDownloadManager, DownloadStatus
+    MODEL_MANAGER_AVAILABLE = True
+except ImportError:
+    MODEL_MANAGER_AVAILABLE = False
+
 app = FastAPI(title="Minette PDF Ollama API")
 
 app.add_middleware(
@@ -45,6 +51,19 @@ except Exception as e:
     print(f"Error initializing Chat RAG Manager: {str(e)}")
     chat_rag_manager = None
 
+# Initialize Model Download Manager
+_models_dir = os.path.join(_base_dir, "models")
+try:
+    if MODEL_MANAGER_AVAILABLE:
+        model_manager = ModelDownloadManager(_models_dir)
+        print("Model Download Manager initialized successfully")
+    else:
+        model_manager = None
+        print("Model Download Manager not available (huggingface-hub not installed)")
+except Exception as e:
+    print(f"Error initializing Model Download Manager: {str(e)}")
+    model_manager = None
+
 
 class ChatRequest(BaseModel):
     message: str
@@ -55,6 +74,18 @@ class ChatRequest(BaseModel):
 
 class ChatSwitchRequest(BaseModel):
     chat_id: str
+
+
+class ModelDownloadRequest(BaseModel):
+    repo_id: str
+    filename: str
+    model_id: str | None = None
+
+
+class ModelSearchRequest(BaseModel):
+    query: str
+    limit: int = 10
+    task: str | None = None
 
 
 @app.get("/health")
@@ -607,6 +638,200 @@ def debug_test_retrieval(query: str, chat_id: str | None = None, top_k: int = 3)
     except Exception as e:
         print(f"Debug retrieval error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Debug retrieval failed: {str(e)}")
+
+
+# ============================================
+# Model Download Management Endpoints
+# ============================================
+
+@app.get("/models")
+async def list_models() -> dict:
+    """List all downloaded models"""
+    if model_manager is None:
+        raise HTTPException(
+            status_code=503, 
+            detail="Model manager not available. Install huggingface-hub package."
+        )
+    
+    try:
+        models = model_manager.list_available_models()
+        return {
+            "models": [
+                {
+                    "model_id": m.model_id,
+                    "repo_id": m.repo_id,
+                    "filename": m.filename,
+                    "local_path": m.local_path,
+                    "size_bytes": m.size_bytes,
+                    "status": m.status.value if hasattr(m.status, 'value') else m.status,
+                    "progress": m.progress
+                }
+                for m in models
+            ],
+            "total": len(models)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list models: {str(e)}")
+
+
+@app.get("/models/{model_id}")
+async def get_model(model_id: str) -> dict:
+    """Get information about a specific model"""
+    if model_manager is None:
+        raise HTTPException(
+            status_code=503, 
+            detail="Model manager not available. Install huggingface-hub package."
+        )
+    
+    model_info = model_manager.get_model_info(model_id)
+    if not model_info:
+        raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
+    
+    return {
+        "model_id": model_info.model_id,
+        "repo_id": model_info.repo_id,
+        "filename": model_info.filename,
+        "local_path": model_info.local_path,
+        "size_bytes": model_info.size_bytes,
+        "status": model_info.status.value if hasattr(model_info.status, 'value') else model_info.status,
+        "progress": model_info.progress,
+        "error": model_info.error
+    }
+
+
+@app.post("/models/download")
+async def download_model(req: ModelDownloadRequest) -> dict:
+    """Download a model from HuggingFace Hub"""
+    if model_manager is None:
+        raise HTTPException(
+            status_code=503, 
+            detail="Model manager not available. Install huggingface-hub package."
+        )
+    
+    print(f"\n=== MODEL DOWNLOAD REQUEST ===")
+    print(f"Repo ID: {req.repo_id}")
+    print(f"Filename: {req.filename}")
+    print(f"Model ID: {req.model_id}")
+    
+    try:
+        model_info = await model_manager.download_model(
+            repo_id=req.repo_id,
+            filename=req.filename,
+            model_id=req.model_id
+        )
+        
+        print(f"Download complete: {model_info.model_id}")
+        print("==============================\n")
+        
+        return {
+            "message": f"Model {model_info.model_id} downloaded successfully",
+            "model_id": model_info.model_id,
+            "local_path": model_info.local_path,
+            "size_bytes": model_info.size_bytes,
+            "status": model_info.status.value if hasattr(model_info.status, 'value') else model_info.status
+        }
+    except Exception as e:
+        print(f"Download error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to download model: {str(e)}")
+
+
+@app.delete("/models/{model_id}")
+async def delete_model(model_id: str) -> dict:
+    """Delete a downloaded model"""
+    if model_manager is None:
+        raise HTTPException(
+            status_code=503, 
+            detail="Model manager not available. Install huggingface-hub package."
+        )
+    
+    print(f"\n=== DELETE MODEL: {model_id} ===")
+    
+    success = model_manager.delete_model(model_id)
+    if success:
+        return {
+            "message": f"Model {model_id} deleted successfully",
+            "model_id": model_id,
+            "deleted": True
+        }
+    else:
+        raise HTTPException(status_code=404, detail=f"Model {model_id} not found or could not be deleted")
+
+
+@app.get("/models/{model_id}/status")
+async def get_model_status(model_id: str) -> dict:
+    """Get the download status of a model"""
+    if model_manager is None:
+        raise HTTPException(
+            status_code=503, 
+            detail="Model manager not available. Install huggingface-hub package."
+        )
+    
+    status = model_manager.get_download_status(model_id)
+    if not status:
+        raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
+    
+    return {
+        "model_id": status.model_id,
+        "progress": status.progress,
+        "downloaded_bytes": status.downloaded_bytes,
+        "total_bytes": status.total_bytes,
+        "status": status.status.value if hasattr(status.status, 'value') else status.status,
+        "error": status.error
+    }
+
+
+@app.post("/models/search")
+async def search_models(req: ModelSearchRequest) -> dict:
+    """Search for models on HuggingFace Hub"""
+    if model_manager is None:
+        raise HTTPException(
+            status_code=503, 
+            detail="Model manager not available. Install huggingface-hub package."
+        )
+    
+    print(f"\n=== SEARCH MODELS ===")
+    print(f"Query: {req.query}")
+    print(f"Limit: {req.limit}")
+    print(f"Task: {req.task}")
+    
+    try:
+        results = await model_manager.search_models(
+            query=req.query,
+            limit=req.limit,
+            task=req.task
+        )
+        
+        print(f"Found {len(results)} models")
+        print("=====================\n")
+        
+        return {
+            "query": req.query,
+            "results": results,
+            "total": len(results)
+        }
+    except Exception as e:
+        print(f"Search error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to search models: {str(e)}")
+
+
+@app.get("/models/repo/{repo_id:path}/files")
+async def list_repo_files(repo_id: str) -> dict:
+    """List all files in a HuggingFace repository"""
+    if model_manager is None:
+        raise HTTPException(
+            status_code=503, 
+            detail="Model manager not available. Install huggingface-hub package."
+        )
+    
+    try:
+        files = await model_manager.list_repo_files_api(repo_id)
+        return {
+            "repo_id": repo_id,
+            "files": files,
+            "total": len(files)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list repo files: {str(e)}")
 
 
 if __name__ == "__main__":

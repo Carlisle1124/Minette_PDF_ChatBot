@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useTheme } from "next-themes";
 import {
   Settings,
@@ -8,6 +8,8 @@ import {
   Cpu,
   ChevronDown,
   Check,
+  AlertCircle,
+  Download,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -19,7 +21,9 @@ import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
+import { Badge } from "@/components/ui/badge";
 import { useSettings, AVAILABLE_MODELS } from "@/lib/settingsStorage";
+import { getPulledModels } from "@/lib/api";
 import {
   Command,
   CommandEmpty,
@@ -38,6 +42,31 @@ export function SettingsPanel() {
   const [tokenInputValue, setTokenInputValue] = useState(
     settings.maxTokens.toString()
   );
+  const [pulledModelNames, setPulledModelNames] = useState<Set<string>>(new Set());
+
+  // Fetch pulled models when settings panel opens
+  const fetchPulledModels = useCallback(async () => {
+    try {
+      const { models } = await getPulledModels();
+      const names = new Set<string>();
+      models.forEach((m) => {
+        names.add(m.name);
+        names.add(m.name.split(":")[0]);
+      });
+      setPulledModelNames(names);
+    } catch {
+      // Silently fail — will just not show installed badges
+    }
+  }, []);
+
+  useEffect(() => {
+    if (open) fetchPulledModels();
+  }, [open, fetchPulledModels]);
+
+  const isModelPulled = (modelId: string) =>
+    pulledModelNames.has(modelId) || pulledModelNames.has(modelId.split(":")[0]);
+
+  const isSelectedModelPulled = isModelPulled(settings.selectedModel);
 
   // Sync local input when settings change externally
   const handleSliderChange = (value: number[]) => {
@@ -197,7 +226,9 @@ export function SettingsPanel() {
                   <CommandList>
                     <CommandEmpty>No model found.</CommandEmpty>
                     <CommandGroup>
-                      {AVAILABLE_MODELS.map((model) => (
+                      {AVAILABLE_MODELS.map((model) => {
+                        const pulled = isModelPulled(model.id);
+                        return (
                         <CommandItem
                           key={model.id}
                           value={model.id}
@@ -217,25 +248,50 @@ export function SettingsPanel() {
                               )}
                             />
                             <span className="font-medium">{model.name}</span>
-                            <span className="ml-auto text-xs text-muted-foreground">
-                              {model.size}
+                            <span className="ml-auto flex items-center gap-1.5">
+                              {pulled ? (
+                                <Badge variant="default" className="text-[10px] px-1.5 py-0 bg-green-600 hover:bg-green-700">
+                                  Installed
+                                </Badge>
+                              ) : (
+                                <Badge variant="outline" className="text-[10px] px-1.5 py-0 text-amber-600 border-amber-400">
+                                  Not pulled
+                                </Badge>
+                              )}
+                              <span className="text-xs text-muted-foreground">
+                                {model.size}
+                              </span>
                             </span>
                           </div>
                           <span className="ml-6 text-xs text-muted-foreground">
                             {model.description}
                           </span>
                         </CommandItem>
-                      ))}
+                        );
+                      })}
                     </CommandGroup>
                   </CommandList>
                 </Command>
               </PopoverContent>
             </Popover>
             <p className="text-xs text-muted-foreground">
-              Select a local model. Make sure it's pulled in Ollama first:{" "}
-              <code className="text-xs bg-muted px-1 rounded">
-                ollama pull {settings.selectedModel}
-              </code>
+              {isSelectedModelPulled ? (
+                <>
+                  <span className="text-green-600 font-medium">Ready to use</span> — {settings.selectedModel} is installed locally.
+                </>
+              ) : (
+                <>
+                  <span className="flex items-center gap-1 text-amber-600 font-medium">
+                    <AlertCircle className="h-3 w-3 inline" />
+                    Not installed
+                  </span>
+                  Use the <strong>Models</strong> button to download{" "}
+                  <code className="text-xs bg-muted px-1 rounded">
+                    {settings.selectedModel}
+                  </code>{" "}
+                  first.
+                </>
+              )}
             </p>
           </div>
         </div>

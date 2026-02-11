@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { Chat } from "@/components/rag/Chat";
 import { SettingsPanel } from "@/components/ui/settings-panel";
+import { ModelManager } from "@/components/ui/model-manager";
 import {
   NotificationsButton,
   type Notification,
@@ -151,6 +152,7 @@ const Index = () => {
           >
             Debug
           </Link>
+          <ModelManager />
           <SettingsPanel />
           <NotificationsButton
             notifications={notifications}

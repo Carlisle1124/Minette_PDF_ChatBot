@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import json
+import requests
 
 from utils.ollama_client import OllamaClient
 from utils.chunker import chunk_text
@@ -23,7 +24,7 @@ except Exception:
     pdfplumber = None
 
 try:
-    from model_manager import ModelDownloadManager, DownloadStatus
+    from model_manager import ModelManager, ModelDownloadManager, DownloadStatus
     MODEL_MANAGER_AVAILABLE = True
 except ImportError:
     MODEL_MANAGER_AVAILABLE = False
@@ -51,17 +52,22 @@ except Exception as e:
     print(f"Error initializing Chat RAG Manager: {str(e)}")
     chat_rag_manager = None
 
-# Initialize Model Download Manager
+# Initialize Model Manager (v2: background downloads, Ollama + HuggingFace)
 _models_dir = os.path.join(_base_dir, "models")
+_ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 try:
     if MODEL_MANAGER_AVAILABLE:
-        model_manager = ModelDownloadManager(_models_dir)
-        print("Model Download Manager initialized successfully")
+        model_manager = ModelManager(
+            models_dir=_models_dir,
+            ollama_url=_ollama_url,
+            max_concurrent_downloads=2,
+        )
+        print("Model Manager v2 initialized (background downloads, Ollama + HuggingFace)")
     else:
         model_manager = None
-        print("Model Download Manager not available (huggingface-hub not installed)")
+        print("Model Manager not available (huggingface-hub not installed)")
 except Exception as e:
-    print(f"Error initializing Model Download Manager: {str(e)}")
+    print(f"Error initializing Model Manager: {str(e)}")
     model_manager = None
 
 
@@ -71,15 +77,20 @@ class ChatRequest(BaseModel):
     chat_id: str | None = None  # Chat ID for context switching
     filter_documents: List[str] | None = None  # Optional list of document IDs to filter by
     max_tokens: int | None = None  # Maximum tokens for response generation
+    model: str | None = None  # Override model for this request (e.g. "llama3.2:1b")
 
 class ChatSwitchRequest(BaseModel):
     chat_id: str
 
 
 class ModelDownloadRequest(BaseModel):
-    repo_id: str
-    filename: str
-    model_id: str | None = None
+    model_config = {"protected_namespaces": ()}
+
+    source: str = "ollama"  # "ollama" or "huggingface"
+    model_name: str | None = None  # For Ollama (e.g. "llama3.2:1b")
+    repo_id: str | None = None  # For HuggingFace
+    filename: str | None = None  # For HuggingFace
+    model_id: str | None = None  # Custom ID (optional)
 
 
 class ModelSearchRequest(BaseModel):
@@ -291,6 +302,7 @@ def chat(req: ChatRequest) -> dict:
     print(f"Question: {req.message}")
     print(f"Chat ID: {req.chat_id}")
     print(f"Max Tokens: {req.max_tokens}")
+    print(f"Model: {req.model}")
     
     # Set chat context if provided
     if req.chat_id:
@@ -312,7 +324,7 @@ def chat(req: ChatRequest) -> dict:
         if total_chunks == 0:
             print("WARNING: No documents found in current chat context - AI will have no context to work with")
         
-        answer, contexts = rag.rag_answer(req.message, max_tokens=req.max_tokens)
+        answer, contexts = rag.rag_answer(req.message, max_tokens=req.max_tokens, model=req.model)
         
         print(f"Generated answer length: {len(answer)} characters")
         print(f"Answer preview: {answer[:200]}...")
@@ -345,6 +357,7 @@ def chat_stream(req: ChatRequest):
     print(f"Chat ID: {req.chat_id}")
     print(f"Top K: {req.top_k}")
     print(f"Max Tokens: {req.max_tokens}")
+    print(f"Model: {req.model}")
     
     # Set chat context if provided
     if req.chat_id:
@@ -373,7 +386,8 @@ def chat_stream(req: ChatRequest):
             for content_chunk, contexts in rag.rag_answer_stream(
                 req.message, 
                 req.top_k,
-                max_tokens=req.max_tokens
+                max_tokens=req.max_tokens,
+                model=req.model
             ):
                 full_answer += content_chunk
                 
@@ -641,197 +655,282 @@ def debug_test_retrieval(query: str, chat_id: str | None = None, top_k: int = 3)
 
 
 # ============================================
-# Model Download Management Endpoints
+# Model Management Endpoints (v2)
 # ============================================
 
-@app.get("/models")
-async def list_models() -> dict:
-    """List all downloaded models"""
+
+class SetActiveModelRequest(BaseModel):
+    model_config = {"protected_namespaces": ()}
+    model_id: str  # e.g. "llama3.2:1b"
+
+
+def _require_model_manager():
     if model_manager is None:
         raise HTTPException(
-            status_code=503, 
-            detail="Model manager not available. Install huggingface-hub package."
+            status_code=503,
+            detail="Model manager not available. Install huggingface-hub package.",
         )
-    
+    return model_manager
+
+
+@app.get("/models/active")
+async def get_active_model() -> dict:
+    """Return the currently active chat model."""
+    return {"model": ollama.chat_model}
+
+
+@app.post("/models/active")
+async def set_active_model(req: SetActiveModelRequest) -> dict:
+    """Set the active chat model globally. The model must be pulled in Ollama."""
+    # Verify the model exists in Ollama
     try:
-        models = model_manager.list_available_models()
+        resp = requests.get(f"{_ollama_url}/api/tags", timeout=5)
+        if resp.status_code == 200:
+            local_models = [m.get("name", "") for m in resp.json().get("models", [])]
+            # Check exact match or base name match
+            found = any(
+                req.model_id == m or req.model_id == m.split(":")[0]
+                for m in local_models
+            )
+            if not found:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Model '{req.model_id}' is not pulled in Ollama. Download it first.",
+                )
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # If Ollama is unreachable, allow setting anyway
+
+    ollama.chat_model = req.model_id
+    print(f"[models] Active chat model changed to: {req.model_id}")
+    return {"model": ollama.chat_model, "message": f"Active model set to {req.model_id}"}
+
+
+@app.get("/models/pulled")
+async def get_pulled_models() -> dict:
+    """Quick check: which Ollama models are already pulled locally."""
+    try:
+        resp = requests.get(f"{_ollama_url}/api/tags", timeout=5)
+        if resp.status_code != 200:
+            return {"models": [], "error": "Ollama not reachable"}
+        models = resp.json().get("models", [])
         return {
             "models": [
                 {
-                    "model_id": m.model_id,
-                    "repo_id": m.repo_id,
-                    "filename": m.filename,
-                    "local_path": m.local_path,
-                    "size_bytes": m.size_bytes,
-                    "status": m.status.value if hasattr(m.status, 'value') else m.status,
-                    "progress": m.progress
+                    "name": m.get("name", ""),
+                    "size": m.get("size", 0),
+                    "modified_at": m.get("modified_at", ""),
                 }
                 for m in models
-            ],
-            "total": len(models)
+            ]
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list models: {str(e)}")
+        return {"models": [], "error": str(e)}
+
+
+# ----- Core 4 endpoints (per spec) -----------------------------------------
+
+
+@app.get("/models/online")
+async def get_online_models(
+    q: str | None = None,
+    source: str | None = None,
+    limit: int = 20,
+) -> dict:
+    """
+    Return models available for download.
+
+    * No params → curated catalog (with installed flag).
+    * ?q=llama&source=huggingface → HuggingFace search.
+    * ?source=ollama → curated Ollama list.
+    """
+    mgr = _require_model_manager()
+    try:
+        models = await mgr.get_online_models(query=q, source=source, limit=limit)
+        return {"models": models, "total": len(models)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/models/local")
+async def get_local_models() -> dict:
+    """Return all installed models (Ollama + HuggingFace downloads)."""
+    mgr = _require_model_manager()
+    try:
+        models = await mgr.get_local_models()
+        return {"models": models, "total": len(models)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/models/download")
+async def start_model_download(req: ModelDownloadRequest) -> dict:
+    """
+    Start a background model download.
+
+    Returns immediately with a ``task_id`` for progress tracking.
+
+    **Ollama**: ``{"source": "ollama", "model_name": "llama3.2:1b"}``
+    **HuggingFace**: ``{"source": "huggingface", "repo_id": "...", "filename": "..."}``
+    """
+    mgr = _require_model_manager()
+    print(f"\n=== MODEL DOWNLOAD (v2) ===")
+    print(f"Source: {req.source}")
+    print(f"Model name: {req.model_name}")
+    print(f"Repo ID: {req.repo_id}")
+    print(f"Filename: {req.filename}")
+    try:
+        result = await mgr.start_download(
+            source=req.source,
+            model_name=req.model_name,
+            repo_id=req.repo_id,
+            filename=req.filename,
+            model_id=req.model_id,
+        )
+        print(f"Download queued: task_id={result['task_id']}")
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/models/progress/{task_id}")
+async def get_download_progress(task_id: str) -> dict:
+    """Get download progress for a background task."""
+    mgr = _require_model_manager()
+    progress = mgr.get_progress(task_id)
+    if not progress:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    return progress
+
+
+# ----- Supporting endpoints ------------------------------------------------
+
+
+@app.post("/models/cancel/{task_id}")
+async def cancel_download(task_id: str) -> dict:
+    """Cancel an active download."""
+    mgr = _require_model_manager()
+    ok = mgr.cancel_download(task_id)
+    if ok:
+        return {"message": f"Download {task_id} cancelled", "task_id": task_id}
+    raise HTTPException(status_code=404, detail="Task not found or already finished")
+
+
+@app.get("/models/queue")
+async def get_download_queue() -> dict:
+    """List all downloads (active, queued, completed, failed)."""
+    mgr = _require_model_manager()
+    queue = mgr.get_queue()
+    return {"downloads": queue, "total": len(queue)}
+
+
+@app.get("/models/progress/{task_id}/stream")
+async def stream_download_progress(task_id: str):
+    """
+    SSE stream for real-time download progress.
+
+    Emits JSON progress objects every 500 ms until the download finishes.
+    """
+    mgr = _require_model_manager()
+    import asyncio as _aio
+
+    async def _generate():
+        while True:
+            progress = mgr.get_progress(task_id)
+            if not progress:
+                yield f"data: {json.dumps({'error': 'task not found'})}\n\n"
+                return
+            yield f"data: {json.dumps(progress)}\n\n"
+            state = progress.get("state", "")
+            if state in ("completed", "failed", "cancelled"):
+                return
+            await _aio.sleep(0.5)
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
+
+# ----- Backward-compat endpoints (keep existing frontend working) ----------
+
+
+@app.get("/models")
+async def list_models() -> dict:
+    """Alias for /models/local (backward compat)."""
+    return await get_local_models()
+
+
+@app.get("/models/{model_id}/status")
+async def get_model_status(model_id: str) -> dict:
+    """Get status (legacy: looks up by model_id, not task_id)."""
+    mgr = _require_model_manager()
+    status = mgr.get_download_status(model_id)
+    if not status:
+        raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
+    return {
+        "model_id": status.model_id,
+        "progress": status.progress,
+        "downloaded_bytes": status.downloaded_bytes,
+        "total_bytes": status.total_bytes,
+        "status": status.status.value if hasattr(status.status, "value") else status.status,
+        "error": status.error,
+    }
 
 
 @app.get("/models/{model_id}")
 async def get_model(model_id: str) -> dict:
-    """Get information about a specific model"""
-    if model_manager is None:
-        raise HTTPException(
-            status_code=503, 
-            detail="Model manager not available. Install huggingface-hub package."
-        )
-    
-    model_info = model_manager.get_model_info(model_id)
+    """Get information about a specific model (legacy)."""
+    mgr = _require_model_manager()
+    model_info = mgr.get_model_info(model_id)
     if not model_info:
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
-    
     return {
         "model_id": model_info.model_id,
         "repo_id": model_info.repo_id,
         "filename": model_info.filename,
         "local_path": model_info.local_path,
         "size_bytes": model_info.size_bytes,
-        "status": model_info.status.value if hasattr(model_info.status, 'value') else model_info.status,
+        "status": model_info.status.value if hasattr(model_info.status, "value") else model_info.status,
         "progress": model_info.progress,
-        "error": model_info.error
+        "error": model_info.error,
     }
-
-
-@app.post("/models/download")
-async def download_model(req: ModelDownloadRequest) -> dict:
-    """Download a model from HuggingFace Hub"""
-    if model_manager is None:
-        raise HTTPException(
-            status_code=503, 
-            detail="Model manager not available. Install huggingface-hub package."
-        )
-    
-    print(f"\n=== MODEL DOWNLOAD REQUEST ===")
-    print(f"Repo ID: {req.repo_id}")
-    print(f"Filename: {req.filename}")
-    print(f"Model ID: {req.model_id}")
-    
-    try:
-        model_info = await model_manager.download_model(
-            repo_id=req.repo_id,
-            filename=req.filename,
-            model_id=req.model_id
-        )
-        
-        print(f"Download complete: {model_info.model_id}")
-        print("==============================\n")
-        
-        return {
-            "message": f"Model {model_info.model_id} downloaded successfully",
-            "model_id": model_info.model_id,
-            "local_path": model_info.local_path,
-            "size_bytes": model_info.size_bytes,
-            "status": model_info.status.value if hasattr(model_info.status, 'value') else model_info.status
-        }
-    except Exception as e:
-        print(f"Download error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to download model: {str(e)}")
 
 
 @app.delete("/models/{model_id}")
 async def delete_model(model_id: str) -> dict:
-    """Delete a downloaded model"""
-    if model_manager is None:
-        raise HTTPException(
-            status_code=503, 
-            detail="Model manager not available. Install huggingface-hub package."
-        )
-    
-    print(f"\n=== DELETE MODEL: {model_id} ===")
-    
-    success = model_manager.delete_model(model_id)
+    """Delete a downloaded model."""
+    mgr = _require_model_manager()
+    success = await mgr.delete_model(model_id)
     if success:
-        return {
-            "message": f"Model {model_id} deleted successfully",
-            "model_id": model_id,
-            "deleted": True
-        }
-    else:
-        raise HTTPException(status_code=404, detail=f"Model {model_id} not found or could not be deleted")
-
-
-@app.get("/models/{model_id}/status")
-async def get_model_status(model_id: str) -> dict:
-    """Get the download status of a model"""
-    if model_manager is None:
-        raise HTTPException(
-            status_code=503, 
-            detail="Model manager not available. Install huggingface-hub package."
-        )
-    
-    status = model_manager.get_download_status(model_id)
-    if not status:
-        raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
-    
-    return {
-        "model_id": status.model_id,
-        "progress": status.progress,
-        "downloaded_bytes": status.downloaded_bytes,
-        "total_bytes": status.total_bytes,
-        "status": status.status.value if hasattr(status.status, 'value') else status.status,
-        "error": status.error
-    }
+        return {"message": f"Model {model_id} deleted", "model_id": model_id, "deleted": True}
+    raise HTTPException(status_code=404, detail=f"Model {model_id} not found or could not be deleted")
 
 
 @app.post("/models/search")
 async def search_models(req: ModelSearchRequest) -> dict:
-    """Search for models on HuggingFace Hub"""
-    if model_manager is None:
-        raise HTTPException(
-            status_code=503, 
-            detail="Model manager not available. Install huggingface-hub package."
-        )
-    
-    print(f"\n=== SEARCH MODELS ===")
-    print(f"Query: {req.query}")
-    print(f"Limit: {req.limit}")
-    print(f"Task: {req.task}")
-    
+    """Search HuggingFace Hub."""
+    mgr = _require_model_manager()
     try:
-        results = await model_manager.search_models(
-            query=req.query,
-            limit=req.limit,
-            task=req.task
-        )
-        
-        print(f"Found {len(results)} models")
-        print("=====================\n")
-        
-        return {
-            "query": req.query,
-            "results": results,
-            "total": len(results)
-        }
+        results = await mgr.search_models(query=req.query, limit=req.limit, task=req.task)
+        return {"query": req.query, "results": results, "total": len(results)}
     except Exception as e:
-        print(f"Search error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to search models: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/models/repo/{repo_id:path}/files")
 async def list_repo_files(repo_id: str) -> dict:
-    """List all files in a HuggingFace repository"""
-    if model_manager is None:
-        raise HTTPException(
-            status_code=503, 
-            detail="Model manager not available. Install huggingface-hub package."
-        )
-    
+    """List files in a HuggingFace repo (with size + URL)."""
+    mgr = _require_model_manager()
     try:
-        files = await model_manager.list_repo_files_api(repo_id)
-        return {
-            "repo_id": repo_id,
-            "files": files,
-            "total": len(files)
-        }
+        files = await mgr.get_repo_files_detailed(repo_id)
+        return {"repo_id": repo_id, "files": files, "total": len(files)}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list repo files: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

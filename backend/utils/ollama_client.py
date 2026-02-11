@@ -44,13 +44,13 @@ class OllamaClient:
         return embedding  # type: ignore[return-value]
 
     # --- Chat Completion ---
-    def chat(self, messages: List[Dict[str, str]], temperature: float = 0.2, max_tokens: Optional[int] = None) -> str:
+    def chat(self, messages: List[Dict[str, str]], temperature: float = 0.2, max_tokens: Optional[int] = None, model: Optional[str] = None) -> str:
         url = f"{self.base_url}/api/chat"
         options: Dict[str, object] = {"temperature": temperature}
         if max_tokens is not None:
             options["num_predict"] = max_tokens
         payload: Dict[str, object] = {
-            "model": self.chat_model,
+            "model": model or self.chat_model,
             "messages": messages,
             "stream": False,
             "options": options,
@@ -68,7 +68,7 @@ class OllamaClient:
             raise RuntimeError("Unexpected chat response from Ollama")
         return content
 
-    def chat_stream(self, messages: List[Dict[str, str]], temperature: float = 0.2, max_tokens: Optional[int] = None):
+    def chat_stream(self, messages: List[Dict[str, str]], temperature: float = 0.2, max_tokens: Optional[int] = None, model: Optional[str] = None):
         """
         Stream chat completion responses from Ollama.
         Yields partial content as it becomes available.
@@ -80,7 +80,7 @@ class OllamaClient:
         if max_tokens is not None:
             options["num_predict"] = max_tokens
         payload: Dict[str, object] = {
-            "model": self.chat_model,
+            "model": model or self.chat_model,
             "messages": messages,
             "stream": True,
             "options": options,

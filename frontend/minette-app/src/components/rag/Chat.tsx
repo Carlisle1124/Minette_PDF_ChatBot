@@ -246,6 +246,7 @@ export const Chat = ({ onNotification, onDocumentDeleted }: ChatProps) => {
         chatId || undefined,
         undefined,
         settings.maxTokens,
+        settings.selectedModel,
       );
 
       for await (const chunk of stream) {

@@ -230,7 +230,7 @@ class RAGPipeline:
         return out
 
     # --- Generate ---
-    def generate(self, query: str, contexts: List[RetrievedContext], max_tokens: int | None = None) -> str:
+    def generate(self, query: str, contexts: List[RetrievedContext], max_tokens: int | None = None, model: str | None = None) -> str:
         system = (
             "You are a helpful assistant. Answer using only the provided context. "
             "If the context is insufficient, say you don't know."
@@ -241,9 +241,9 @@ class RAGPipeline:
             {"role": "system", "content": system},
             {"role": "user", "content": user_prompt},
         ]
-        return self.ollama.chat(messages, max_tokens=max_tokens)
+        return self.ollama.chat(messages, max_tokens=max_tokens, model=model)
 
-    def generate_stream(self, query: str, contexts: List[RetrievedContext], max_tokens: int | None = None):
+    def generate_stream(self, query: str, contexts: List[RetrievedContext], max_tokens: int | None = None, model: str | None = None):
         """
         Stream the generated response word by word.
         """
@@ -259,16 +259,16 @@ class RAGPipeline:
         ]
         
         # Stream from Ollama
-        for content_chunk in self.ollama.chat_stream(messages, max_tokens=max_tokens):
+        for content_chunk in self.ollama.chat_stream(messages, max_tokens=max_tokens, model=model):
             yield content_chunk
 
     # --- Full RAG ---
-    def rag_answer(self, query: str, k: int | None = None, max_tokens: int | None = None) -> Tuple[str, List[RetrievedContext]]:
+    def rag_answer(self, query: str, k: int | None = None, max_tokens: int | None = None, model: str | None = None) -> Tuple[str, List[RetrievedContext]]:
         contexts = self.retrieve(query, k)
-        answer = self.generate(query, contexts, max_tokens=max_tokens)
+        answer = self.generate(query, contexts, max_tokens=max_tokens, model=model)
         return answer, contexts
 
-    def rag_answer_stream(self, query: str, k: int | None = None, filter_doc_ids: List[str] | None = None, max_tokens: int | None = None):
+    def rag_answer_stream(self, query: str, k: int | None = None, filter_doc_ids: List[str] | None = None, max_tokens: int | None = None, model: str | None = None):
         """
         Stream the RAG answer and return contexts separately.
         Yields tuples of (content_chunk, contexts) where contexts is only populated on first yield.
@@ -277,7 +277,7 @@ class RAGPipeline:
         
         # Yield contexts with first chunk
         first_chunk = True
-        for content_chunk in self.generate_stream(query, contexts, max_tokens=max_tokens):
+        for content_chunk in self.generate_stream(query, contexts, max_tokens=max_tokens, model=model):
             if first_chunk:
                 yield content_chunk, contexts
                 first_chunk = False

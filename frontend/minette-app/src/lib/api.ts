@@ -50,7 +50,7 @@ export async function addPdf(file: File, chatId?: string): Promise<{ filename: s
   return res.json();
 }
 
-export async function chat(question: string, chatId?: string, topK?: number, maxTokens?: number): Promise<ChatResponse> {
+export async function chat(question: string, chatId?: string, topK?: number, maxTokens?: number, model?: string): Promise<ChatResponse> {
   const res = await fetch(`${BASE_URL}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -58,7 +58,8 @@ export async function chat(question: string, chatId?: string, topK?: number, max
       message: question, 
       chat_id: chatId,
       top_k: topK,
-      max_tokens: maxTokens
+      max_tokens: maxTokens,
+      model: model || undefined,
     }),
   });
   if (!res.ok) {
@@ -73,7 +74,7 @@ export interface StreamChunk {
   data: any;
 }
 
-export async function* chatStream(question: string, chatId?: string, topK?: number, maxTokens?: number): AsyncGenerator<StreamChunk, void, undefined> {
+export async function* chatStream(question: string, chatId?: string, topK?: number, maxTokens?: number, model?: string): AsyncGenerator<StreamChunk, void, undefined> {
   const res = await fetch(`${BASE_URL}/chat/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -81,7 +82,8 @@ export async function* chatStream(question: string, chatId?: string, topK?: numb
       message: question, 
       chat_id: chatId,
       top_k: topK,
-      max_tokens: maxTokens
+      max_tokens: maxTokens,
+      model: model || undefined,
     }),
   });
 
@@ -345,8 +347,10 @@ export async function listBackendChats(): Promise<{ chats: BackendChatInfo[]; to
 }
 
 // ============================================
-// Model Download Management API
+// Model Download Management API (v2)
 // ============================================
+
+// --- Types ---
 
 export interface ModelInfo {
   model_id: string;
@@ -368,53 +372,191 @@ export interface ModelSearchResult {
   library_name: string | null;
 }
 
+export interface OnlineModel {
+  id: string;
+  name: string;
+  source: "ollama" | "huggingface";
+  size_label: string;
+  description: string;
+  tags: string[];
+  downloads: number;
+  likes: number;
+  repo_id: string | null;
+  filename: string | null;
+  download_url: string | null;
+  sha256: string | null;
+  installed: boolean;
+}
+
+export interface LocalModel {
+  id: string;
+  name: string;
+  source: "ollama" | "huggingface";
+  size_bytes: number;
+  size_label: string;
+  local_path: string | null;
+  family: string;
+  quantization: string;
+  tags: string[];
+  available?: boolean;
+}
+
+export interface DownloadProgress {
+  task_id: string;
+  state: "queued" | "downloading" | "verifying" | "completed" | "failed" | "cancelled";
+  progress_percent: number;
+  downloaded_bytes: number;
+  total_bytes: number;
+  speed_bps: number;
+  eta_seconds: number;
+  error: string | null;
+  attempt: number;
+  max_retries: number;
+  filename: string;
+  model_id: string;
+  source: string;
+}
+
+export interface DownloadRequest {
+  source: "ollama" | "huggingface";
+  model_name?: string;      // For Ollama
+  repo_id?: string;         // For HuggingFace
+  filename?: string;        // For HuggingFace
+  model_id?: string;        // Custom ID (optional)
+}
+
+export interface RepoFileInfo {
+  filename: string;
+  size: number | null;
+  size_label: string;
+  download_url: string;
+  sha256?: string;
+}
+
+// --- Core 4 Endpoints ---
+
+/** GET /models/online — registry/catalog models available for download */
+export async function getOnlineModels(
+  query?: string,
+  source?: string,
+  limit: number = 20
+): Promise<{ models: OnlineModel[]; total: number }> {
+  const params = new URLSearchParams();
+  if (query) params.set("q", query);
+  if (source) params.set("source", source);
+  params.set("limit", limit.toString());
+  const qs = params.toString();
+  const res = await fetch(`${BASE_URL}/models/online${qs ? `?${qs}` : ""}`);
+  if (!res.ok) { const t = await res.text(); throw new Error(`Online models failed (${res.status}): ${t}`); }
+  return res.json();
+}
+
+/** GET /models/local — installed models (Ollama + HuggingFace) */
+export async function getLocalModels(): Promise<{ models: LocalModel[]; total: number }> {
+  const res = await fetch(`${BASE_URL}/models/local`);
+  if (!res.ok) { const t = await res.text(); throw new Error(`Local models failed (${res.status}): ${t}`); }
+  return res.json();
+}
+
+/** POST /models/download — start background download */
+export async function startModelDownload(req: DownloadRequest): Promise<{
+  task_id: string;
+  model_id: string;
+  source: string;
+}> {
+  const res = await fetch(`${BASE_URL}/models/download`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) { const t = await res.text(); throw new Error(`Start download failed (${res.status}): ${t}`); }
+  return res.json();
+}
+
+/** GET /models/progress/:id — download progress (polling) */
+export async function getDownloadProgress(taskId: string): Promise<DownloadProgress> {
+  const res = await fetch(`${BASE_URL}/models/progress/${encodeURIComponent(taskId)}`);
+  if (!res.ok) { const t = await res.text(); throw new Error(`Progress failed (${res.status}): ${t}`); }
+  return res.json();
+}
+
+// --- Supporting Endpoints ---
+
+/** POST /models/cancel/:id */
+export async function cancelDownload(taskId: string): Promise<{ message: string; task_id: string }> {
+  const res = await fetch(`${BASE_URL}/models/cancel/${encodeURIComponent(taskId)}`, { method: "POST" });
+  if (!res.ok) { const t = await res.text(); throw new Error(`Cancel failed (${res.status}): ${t}`); }
+  return res.json();
+}
+
+/** GET /models/queue — all downloads with status */
+export async function getDownloadQueue(): Promise<{ downloads: DownloadProgress[]; total: number }> {
+  const res = await fetch(`${BASE_URL}/models/queue`);
+  if (!res.ok) { const t = await res.text(); throw new Error(`Queue failed (${res.status}): ${t}`); }
+  return res.json();
+}
+
+/** SSE stream for real-time download progress */
+export function streamDownloadProgress(
+  taskId: string,
+  onProgress: (p: DownloadProgress) => void,
+  onDone: () => void,
+  onError: (err: string) => void,
+): () => void {
+  const url = `${BASE_URL}/models/progress/${encodeURIComponent(taskId)}/stream`;
+  const evtSource = new EventSource(url);
+
+  evtSource.onmessage = (evt) => {
+    try {
+      const data: DownloadProgress = JSON.parse(evt.data);
+      if ("error" in data && (data as any).error === "task not found") {
+        onError("Task not found");
+        evtSource.close();
+        return;
+      }
+      onProgress(data);
+      if (["completed", "failed", "cancelled"].includes(data.state)) {
+        onDone();
+        evtSource.close();
+      }
+    } catch { /* ignore parse errors */ }
+  };
+
+  evtSource.onerror = () => {
+    onError("SSE connection lost");
+    evtSource.close();
+  };
+
+  // Return a cleanup function
+  return () => evtSource.close();
+}
+
+// --- Legacy endpoints (backward compat) ---
+
 export async function listModels(): Promise<{ models: ModelInfo[]; total: number }> {
   const res = await fetch(`${BASE_URL}/models`);
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`List models failed (${res.status}): ${text}`);
-  }
+  if (!res.ok) { const t = await res.text(); throw new Error(`List models failed (${res.status}): ${t}`); }
   return res.json();
 }
 
 export async function getModel(modelId: string): Promise<ModelInfo> {
   const res = await fetch(`${BASE_URL}/models/${encodeURIComponent(modelId)}`);
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Get model failed (${res.status}): ${text}`);
-  }
+  if (!res.ok) { const t = await res.text(); throw new Error(`Get model failed (${res.status}): ${t}`); }
   return res.json();
 }
 
 export async function downloadModel(
   repoId: string,
   filename: string,
-  modelId?: string
-): Promise<{ message: string; model_id: string; local_path: string; size_bytes: number; status: string }> {
-  const res = await fetch(`${BASE_URL}/models/download`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      repo_id: repoId,
-      filename: filename,
-      model_id: modelId
-    }),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Download model failed (${res.status}): ${text}`);
-  }
-  return res.json();
+  modelId?: string,
+): Promise<{ task_id: string; model_id: string; source: string }> {
+  // Redirect to new v2 endpoint
+  return startModelDownload({ source: "huggingface", repo_id: repoId, filename, model_id: modelId });
 }
 
 export async function deleteModel(modelId: string): Promise<{ message: string; model_id: string; deleted: boolean }> {
-  const res = await fetch(`${BASE_URL}/models/${encodeURIComponent(modelId)}`, {
-    method: "DELETE",
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Delete model failed (${res.status}): ${text}`);
-  }
+  const res = await fetch(`${BASE_URL}/models/${encodeURIComponent(modelId)}`, { method: "DELETE" });
+  if (!res.ok) { const t = await res.text(); throw new Error(`Delete model failed (${res.status}): ${t}`); }
   return res.json();
 }
 
@@ -427,39 +569,65 @@ export async function getModelStatus(modelId: string): Promise<{
   error: string | null;
 }> {
   const res = await fetch(`${BASE_URL}/models/${encodeURIComponent(modelId)}/status`);
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Get model status failed (${res.status}): ${text}`);
-  }
+  if (!res.ok) { const t = await res.text(); throw new Error(`Model status failed (${res.status}): ${t}`); }
   return res.json();
 }
 
 export async function searchModels(
   query: string,
   limit: number = 10,
-  task?: string
+  task?: string,
 ): Promise<{ query: string; results: ModelSearchResult[]; total: number }> {
   const res = await fetch(`${BASE_URL}/models/search`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      query: query,
-      limit: limit,
-      task: task
-    }),
+    body: JSON.stringify({ query, limit, task }),
   });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Search models failed (${res.status}): ${text}`);
-  }
+  if (!res.ok) { const t = await res.text(); throw new Error(`Search models failed (${res.status}): ${t}`); }
   return res.json();
 }
 
-export async function listRepoFiles(repoId: string): Promise<{ repo_id: string; files: string[]; total: number }> {
+export async function listRepoFiles(repoId: string): Promise<{
+  repo_id: string;
+  files: RepoFileInfo[];
+  total: number;
+}> {
   const res = await fetch(`${BASE_URL}/models/repo/${encodeURIComponent(repoId)}/files`);
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`List repo files failed (${res.status}): ${text}`);
-  }
+  if (!res.ok) { const t = await res.text(); throw new Error(`List repo files failed (${res.status}): ${t}`); }
+  return res.json();
+}
+
+// ============================================
+// Active Model & Pulled Models
+// ============================================
+
+/** GET /models/active — get the currently active chat model */
+export async function getActiveModel(): Promise<{ model: string }> {
+  const res = await fetch(`${BASE_URL}/models/active`);
+  if (!res.ok) { const t = await res.text(); throw new Error(`Get active model failed (${res.status}): ${t}`); }
+  return res.json();
+}
+
+/** POST /models/active — set the active chat model */
+export async function setActiveModel(modelId: string): Promise<{ model: string; message: string }> {
+  const res = await fetch(`${BASE_URL}/models/active`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model_id: modelId }),
+  });
+  if (!res.ok) { const t = await res.text(); throw new Error(`Set active model failed (${res.status}): ${t}`); }
+  return res.json();
+}
+
+/** GET /models/pulled — quick check which Ollama models are pulled */
+export interface PulledModel {
+  name: string;
+  size: number;
+  modified_at: string;
+}
+
+export async function getPulledModels(): Promise<{ models: PulledModel[]; error?: string }> {
+  const res = await fetch(`${BASE_URL}/models/pulled`);
+  if (!res.ok) { const t = await res.text(); throw new Error(`Get pulled models failed (${res.status}): ${t}`); }
   return res.json();
 }

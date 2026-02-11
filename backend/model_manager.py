@@ -1,377 +1,392 @@
 """
-Model Manager Service
-Handles downloading and managing AI models from HuggingFace Hub
+Model Manager  (v2)
+====================
+Central orchestrator for model lifecycle:
+
+    Frontend → API Endpoints → **ModelManager** → DownloadManager (background)
+                                                → ModelRegistry   (discovery)
+                                                → Local Storage   (./models/)
+
+Public surface used by ``main.py``:
+    manager.get_online_models(query, source, limit)
+    manager.get_local_models()
+    manager.start_download(source, model_name, repo_id, filename)
+    manager.get_progress(task_id)
+    manager.cancel_download(task_id)
+    manager.delete_model(model_id)
+    manager.get_queue()
+
+Backward-compat aliases (used by existing endpoints):
+    ModelDownloadManager = ModelManager
+    DownloadStatus       = download_manager.DownloadState
 """
 from __future__ import annotations
 
-import os
 import json
-import asyncio
-from pathlib import Path
-from typing import Dict, List, Optional, Callable
-from dataclasses import dataclass, asdict
-from enum import Enum
+import os
 import shutil
+from pathlib import Path
+from typing import Dict, List, Optional
 
-try:
-    from huggingface_hub import hf_hub_download, list_repo_files, HfApi
-    from huggingface_hub.utils import HfHubHTTPError
-    HF_HUB_AVAILABLE = True
-except ImportError:
-    HF_HUB_AVAILABLE = False
+from download_manager import DownloadManager, DownloadState
+from model_registry import (
+    ModelRegistry,
+    OnlineModelInfo,
+    LocalModelInfo,
+    _format_bytes,
+)
 
-
-class DownloadStatus(str, Enum):
-    PENDING = "pending"
-    DOWNLOADING = "downloading"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-
-
-@dataclass
-class ModelInfo:
-    """Information about a model"""
-    model_id: str
-    repo_id: str
-    filename: str
-    local_path: Optional[str] = None
-    size_bytes: Optional[int] = None
-    status: DownloadStatus = DownloadStatus.PENDING
-    progress: float = 0.0
-    error: Optional[str] = None
+# Backward-compat alias so existing ``from model_manager import DownloadStatus``
+# keeps working (maps to the new enum).
+DownloadStatus = DownloadState
 
 
-@dataclass
-class DownloadProgress:
-    """Progress information for a download"""
-    model_id: str
-    progress: float
-    downloaded_bytes: int
-    total_bytes: int
-    status: DownloadStatus
-    error: Optional[str] = None
+class ModelManager:
+    """
+    Unified model manager.
 
+    * Discovery:  curated catalog + HuggingFace search + Ollama tags
+    * Downloads:  async background via ``DownloadManager``
+    * Storage:    ``./models/{model_id}/`` for HF files; Ollama-managed for pulls
+    * Registry:   ``./models/registry.json`` tracks HF-downloaded models
+    """
 
-class ModelDownloadManager:
-    """Manages model downloads from HuggingFace Hub"""
-    
-    def __init__(self, models_dir: str = "models"):
-        """
-        Initialize the model download manager
-        
-        Args:
-            models_dir: Directory to store downloaded models
-        """
-        if not HF_HUB_AVAILABLE:
-            raise RuntimeError(
-                "huggingface_hub is required. Install with: pip install huggingface-hub"
-            )
-        
+    def __init__(
+        self,
+        models_dir: str = "models",
+        ollama_url: str = "http://localhost:11434",
+        max_concurrent_downloads: int = 2,
+    ):
         self.models_dir = Path(models_dir)
         self.models_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Track active downloads
-        self.active_downloads: Dict[str, ModelInfo] = {}
-        self.download_callbacks: Dict[str, List[Callable]] = {}
-        
-        # Initialize HuggingFace API
-        self.hf_api = HfApi()
-        
-        # Load existing models registry
-        self.registry_file = self.models_dir / "registry.json"
-        self.registry: Dict[str, ModelInfo] = self._load_registry()
-    
-    def _load_registry(self) -> Dict[str, ModelInfo]:
-        """Load the models registry from disk"""
-        if self.registry_file.exists():
+        self.ollama_url = ollama_url
+
+        self.registry = ModelRegistry(ollama_url)
+        self.downloads = DownloadManager(max_concurrent=max_concurrent_downloads)
+
+        # Persistent local registry for HF downloads
+        self._reg_path = self.models_dir / "registry.json"
+        self._local_reg: Dict[str, dict] = self._load_registry()
+
+    # ------------------------------------------------------------------
+    # Local registry persistence (HuggingFace models only)
+    # ------------------------------------------------------------------
+
+    def _load_registry(self) -> Dict[str, dict]:
+        if self._reg_path.exists():
             try:
-                with open(self.registry_file, 'r') as f:
-                    data = json.load(f)
-                    return {
-                        k: ModelInfo(**v) for k, v in data.items()
-                    }
+                with open(self._reg_path, "r") as f:
+                    return json.load(f)
             except Exception as e:
-                print(f"Error loading registry: {e}")
+                print(f"[model_manager] registry load error: {e}")
         return {}
-    
+
     def _save_registry(self):
-        """Save the models registry to disk"""
         try:
-            with open(self.registry_file, 'w') as f:
-                data = {k: asdict(v) for k, v in self.registry.items()}
-                json.dump(data, f, indent=2)
+            with open(self._reg_path, "w") as f:
+                json.dump(self._local_reg, f, indent=2)
         except Exception as e:
-            print(f"Error saving registry: {e}")
-    
-    def list_available_models(self) -> List[ModelInfo]:
-        """List all models available in the local registry"""
-        return list(self.registry.values())
-    
-    def get_model_info(self, model_id: str) -> Optional[ModelInfo]:
-        """Get information about a specific model"""
-        return self.registry.get(model_id)
-    
-    def is_model_downloaded(self, model_id: str) -> bool:
-        """Check if a model is already downloaded"""
-        model_info = self.registry.get(model_id)
-        if not model_info:
-            return False
-        
-        if model_info.local_path and os.path.exists(model_info.local_path):
-            return model_info.status == DownloadStatus.COMPLETED
-        return False
-    
-    async def download_model(
+            print(f"[model_manager] registry save error: {e}")
+
+    def _register_hf_model(
+        self, task_id: Optional[str], dest_path: Optional[str], model_id: str
+    ):
+        """Callback fired by DownloadManager when an HF download completes."""
+        size = os.path.getsize(dest_path) if dest_path and os.path.exists(dest_path) else 0
+        self._local_reg[model_id] = {
+            "model_id": model_id,
+            "local_path": dest_path,
+            "size_bytes": size,
+            "size_label": _format_bytes(size),
+            "source": "huggingface",
+        }
+        self._save_registry()
+        print(f"[model_manager] registered HF model: {model_id}")
+
+    # ------------------------------------------------------------------
+    # Online models  (GET /models/online)
+    # ------------------------------------------------------------------
+
+    async def get_online_models(
         self,
-        repo_id: str,
-        filename: str,
+        query: Optional[str] = None,
+        source: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[dict]:
+        """
+        Return models available for download.
+
+        * No query → curated catalog (with ``installed`` flag resolved).
+        * ``source=huggingface`` + query → HuggingFace search.
+        * ``source=ollama`` (no query) → curated Ollama list.
+        """
+        # Resolve which models are already local
+        local_ids = set()
+        try:
+            ollama_local = await self.registry.list_ollama_local()
+            for m in ollama_local:
+                local_ids.add(m.id)
+                # Also add the base name (without tag)
+                base = m.id.split(":")[0]
+                local_ids.add(base)
+        except Exception:
+            pass
+        for mid in self._local_reg:
+            local_ids.add(mid)
+
+        results: List[OnlineModelInfo] = []
+
+        if query and (source is None or source == "huggingface"):
+            results = await self.registry.search_huggingface(query, limit)
+        elif source == "huggingface" and not query:
+            results = await self.registry.search_huggingface("gguf", limit)
+        else:
+            results = self.registry.get_curated()
+
+        # Mark installed flag
+        for m in results:
+            if m.id in local_ids:
+                m.installed = True
+
+        return [m.to_dict() for m in results]
+
+    # ------------------------------------------------------------------
+    # Local models  (GET /models/local)
+    # ------------------------------------------------------------------
+
+    async def get_local_models(self) -> List[dict]:
+        """
+        Combine Ollama-pulled models + HF-downloaded models into one list.
+        """
+        models: List[dict] = []
+
+        # 1) Ollama local
+        try:
+            ollama_models = await self.registry.list_ollama_local()
+            for m in ollama_models:
+                models.append(m.to_dict())
+        except Exception as e:
+            print(f"[model_manager] ollama local list error: {e}")
+
+        # 2) HF downloaded (from registry.json)
+        for mid, info in self._local_reg.items():
+            lp = info.get("local_path")
+            exists = lp and os.path.exists(lp)
+            models.append({
+                "id": mid,
+                "name": mid,
+                "source": "huggingface",
+                "size_bytes": info.get("size_bytes", 0),
+                "size_label": info.get("size_label", ""),
+                "local_path": lp if exists else None,
+                "family": "",
+                "quantization": "",
+                "tags": ["huggingface"],
+                "available": exists,
+            })
+
+        return models
+
+    # ------------------------------------------------------------------
+    # Start download  (POST /models/download)
+    # ------------------------------------------------------------------
+
+    async def start_download(
+        self,
+        source: str = "ollama",
+        model_name: Optional[str] = None,
+        repo_id: Optional[str] = None,
+        filename: Optional[str] = None,
         model_id: Optional[str] = None,
-        progress_callback: Optional[Callable[[DownloadProgress], None]] = None
-    ) -> ModelInfo:
+    ) -> dict:
         """
-        Download a model from HuggingFace Hub
-        
-        Args:
-            repo_id: HuggingFace repository ID (e.g., "sentence-transformers/all-MiniLM-L6-v2")
-            filename: Specific file to download (e.g., "pytorch_model.bin")
-            model_id: Optional custom ID for the model. If not provided, uses repo_id
-            progress_callback: Optional callback for progress updates
-            
-        Returns:
-            ModelInfo object with download details
+        Start a background download.  Returns ``{task_id, model_id, source}``.
+
+        For **Ollama**: supply ``model_name`` (e.g. ``"llama3.2:1b"``).
+        For **HuggingFace**: supply ``repo_id`` + ``filename``.
         """
-        if model_id is None:
-            model_id = f"{repo_id}/{filename}".replace("/", "_")
-        
-        # Check if already downloaded
-        if self.is_model_downloaded(model_id):
-            return self.registry[model_id]
-        
-        # Create model info
-        model_info = ModelInfo(
-            model_id=model_id,
-            repo_id=repo_id,
-            filename=filename,
-            status=DownloadStatus.DOWNLOADING
-        )
-        
-        self.active_downloads[model_id] = model_info
-        
-        if progress_callback:
-            if model_id not in self.download_callbacks:
-                self.download_callbacks[model_id] = []
-            self.download_callbacks[model_id].append(progress_callback)
-        
-        try:
-            # Create model-specific directory
-            model_dir = self.models_dir / model_id.replace("/", "_")
-            model_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Download the file
-            print(f"Downloading {repo_id}/{filename} to {model_dir}")
-            
-            # Use hf_hub_download for single file download
-            local_path = await asyncio.to_thread(
-                hf_hub_download,
-                repo_id=repo_id,
-                filename=filename,
-                cache_dir=str(model_dir),
-                local_dir=str(model_dir),
-                local_dir_use_symlinks=False
+        if source == "ollama":
+            if not model_name:
+                raise ValueError("model_name is required for Ollama downloads")
+            task_id = await self.downloads.start_ollama_pull(
+                model_name,
+                ollama_url=self.ollama_url,
             )
-            
-            # Get file size
-            file_size = os.path.getsize(local_path)
-            
-            # Update model info
-            model_info.local_path = local_path
-            model_info.size_bytes = file_size
-            model_info.status = DownloadStatus.COMPLETED
-            model_info.progress = 100.0
-            
-            # Save to registry
-            self.registry[model_id] = model_info
+            return {"task_id": task_id, "model_id": model_name, "source": "ollama"}
+
+        elif source == "huggingface":
+            if not repo_id or not filename:
+                raise ValueError("repo_id and filename are required for HuggingFace downloads")
+
+            mid = model_id or f"{repo_id}__{filename}".replace("/", "_")
+            dest_dir = self.models_dir / mid.replace("/", "_")
+            dest_path = str(dest_dir / filename)
+
+            url = self.registry.get_hf_download_url(repo_id, filename)
+
+            # Try to get file sha256 from repo metadata
+            sha256 = None
+            try:
+                files = await self.registry.get_hf_model_files(repo_id)
+                for f in files:
+                    if f.get("filename") == filename:
+                        sha256 = f.get("sha256")
+                        break
+            except Exception:
+                pass
+
+            task_id = await self.downloads.start_http_download(
+                url=url,
+                dest_path=dest_path,
+                model_id=mid,
+                filename=filename,
+                source="huggingface",
+                expected_hash=sha256,
+                on_complete=self._register_hf_model,
+            )
+            return {"task_id": task_id, "model_id": mid, "source": "huggingface"}
+
+        else:
+            raise ValueError(f"Unknown source: {source}")
+
+    # ------------------------------------------------------------------
+    # Progress / Queue  (GET /models/progress/:id , GET /models/queue)
+    # ------------------------------------------------------------------
+
+    def get_progress(self, task_id: str) -> Optional[dict]:
+        return self.downloads.get_progress(task_id)
+
+    def get_queue(self) -> List[dict]:
+        return self.downloads.get_all_progress()
+
+    def get_active_downloads(self) -> List[dict]:
+        return self.downloads.get_active_downloads()
+
+    # ------------------------------------------------------------------
+    # Cancel  (POST /models/cancel/:id)
+    # ------------------------------------------------------------------
+
+    def cancel_download(self, task_id: str) -> bool:
+        return self.downloads.cancel(task_id)
+
+    # ------------------------------------------------------------------
+    # Delete local model
+    # ------------------------------------------------------------------
+
+    async def delete_model(self, model_id: str) -> bool:
+        """Delete a model from local storage."""
+        deleted = False
+
+        # 1) HF registry
+        if model_id in self._local_reg:
+            info = self._local_reg[model_id]
+            lp = info.get("local_path")
+            if lp:
+                model_dir = Path(lp).parent
+                if model_dir.exists() and model_dir != self.models_dir:
+                    shutil.rmtree(model_dir, ignore_errors=True)
+            del self._local_reg[model_id]
             self._save_registry()
-            
-            # Send final progress update
-            if progress_callback:
-                progress = DownloadProgress(
-                    model_id=model_id,
-                    progress=100.0,
-                    downloaded_bytes=file_size,
-                    total_bytes=file_size,
-                    status=DownloadStatus.COMPLETED
-                )
-                progress_callback(progress)
-            
-            print(f"Successfully downloaded {model_id}")
-            return model_info
-            
-        except HfHubHTTPError as e:
-            error_msg = f"HuggingFace Hub error: {str(e)}"
-            print(error_msg)
-            model_info.status = DownloadStatus.FAILED
-            model_info.error = error_msg
-            
-            if progress_callback:
-                progress = DownloadProgress(
-                    model_id=model_id,
-                    progress=model_info.progress,
-                    downloaded_bytes=0,
-                    total_bytes=0,
-                    status=DownloadStatus.FAILED,
-                    error=error_msg
-                )
-                progress_callback(progress)
-            
-            raise
-            
-        except Exception as e:
-            error_msg = f"Download error: {str(e)}"
-            print(error_msg)
-            model_info.status = DownloadStatus.FAILED
-            model_info.error = error_msg
-            
-            if progress_callback:
-                progress = DownloadProgress(
-                    model_id=model_id,
-                    progress=model_info.progress,
-                    downloaded_bytes=0,
-                    total_bytes=0,
-                    status=DownloadStatus.FAILED,
-                    error=error_msg
-                )
-                progress_callback(progress)
-            
-            raise
-            
-        finally:
-            # Clean up
-            if model_id in self.active_downloads:
-                del self.active_downloads[model_id]
-            if model_id in self.download_callbacks:
-                del self.download_callbacks[model_id]
-    
-    def delete_model(self, model_id: str) -> bool:
-        """
-        Delete a downloaded model
-        
-        Args:
-            model_id: ID of the model to delete
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        model_info = self.registry.get(model_id)
-        if not model_info:
-            return False
-        
+            deleted = True
+            print(f"[model_manager] deleted HF model: {model_id}")
+
+        # 2) Ollama
         try:
-            # Delete model directory
-            if model_info.local_path:
-                model_dir = Path(model_info.local_path).parent
-                if model_dir.exists():
-                    shutil.rmtree(model_dir)
-            
-            # Remove from registry
-            del self.registry[model_id]
-            self._save_registry()
-            
-            print(f"Successfully deleted model {model_id}")
-            return True
-            
-        except Exception as e:
-            print(f"Error deleting model {model_id}: {e}")
-            return False
-    
-    def get_download_status(self, model_id: str) -> Optional[DownloadProgress]:
-        """
-        Get the current download status for a model
-        
-        Args:
-            model_id: ID of the model
-            
-        Returns:
-            DownloadProgress object or None if not downloading
-        """
-        model_info = self.active_downloads.get(model_id)
-        if not model_info:
-            # Check if it's in the registry
-            model_info = self.registry.get(model_id)
-            if not model_info:
-                return None
-        
-        return DownloadProgress(
-            model_id=model_id,
-            progress=model_info.progress,
-            downloaded_bytes=model_info.size_bytes or 0,
-            total_bytes=model_info.size_bytes or 0,
-            status=model_info.status,
-            error=model_info.error
-        )
-    
+            import requests
+            resp = requests.delete(
+                f"{self.ollama_url}/api/delete",
+                json={"name": model_id},
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                deleted = True
+                print(f"[model_manager] deleted Ollama model: {model_id}")
+        except Exception:
+            pass
+
+        return deleted
+
+    # ------------------------------------------------------------------
+    # HuggingFace search & repo files  (backward-compat helpers)
+    # ------------------------------------------------------------------
+
     async def search_models(
         self,
         query: str,
         limit: int = 10,
-        task: Optional[str] = None
-    ) -> List[Dict]:
-        """
-        Search for models on HuggingFace Hub
-        
-        Args:
-            query: Search query
-            limit: Maximum number of results
-            task: Optional task filter (e.g., "text-generation", "text-classification")
-            
-        Returns:
-            List of model information dictionaries
-        """
-        try:
-            models = await asyncio.to_thread(
-                lambda: list(self.hf_api.list_models(
-                    search=query,
-                    limit=limit,
-                    task=task,
-                    sort="downloads",
-                    direction=-1
-                ))
-            )
-            
-            results = []
-            for model in models:
-                results.append({
-                    "model_id": model.modelId,
-                    "downloads": model.downloads or 0,
-                    "likes": model.likes or 0,
-                    "tags": model.tags or [],
-                    "pipeline_tag": model.pipeline_tag,
-                    "library_name": model.library_name
-                })
-            
-            return results
-            
-        except Exception as e:
-            print(f"Error searching models: {e}")
-            return []
-    
+        task: Optional[str] = None,
+    ) -> List[dict]:
+        """Backward-compat: search HuggingFace Hub."""
+        models = await self.registry.search_huggingface(query, limit, task)
+        return [m.to_dict() for m in models]
+
     async def list_repo_files_api(self, repo_id: str) -> List[str]:
-        """
-        List all files in a HuggingFace repository
-        
-        Args:
-            repo_id: Repository ID
-            
-        Returns:
-            List of file paths in the repository
-        """
-        try:
-            files = await asyncio.to_thread(
-                list_repo_files,
-                repo_id=repo_id
-            )
-            return files
-        except Exception as e:
-            print(f"Error listing repo files: {e}")
-            return []
+        """Backward-compat: list files in a HF repo."""
+        files_info = await self.registry.get_hf_model_files(repo_id)
+        return [f["filename"] for f in files_info]
+
+    async def get_repo_files_detailed(self, repo_id: str) -> List[dict]:
+        """List files in a HF repo with size + URL + sha256."""
+        return await self.registry.get_hf_model_files(repo_id)
+
+    # ------------------------------------------------------------------
+    # Legacy accessors (keep old endpoints working while we migrate)
+    # ------------------------------------------------------------------
+
+    def list_available_models(self):
+        """Legacy: return HF registry entries as list of dicts."""
+        return [
+            type("M", (), {
+                "model_id": mid,
+                "repo_id": info.get("model_id", mid),
+                "filename": "",
+                "local_path": info.get("local_path"),
+                "size_bytes": info.get("size_bytes"),
+                "status": DownloadState.COMPLETED,
+                "progress": 100.0,
+            })
+            for mid, info in self._local_reg.items()
+        ]
+
+    def get_model_info(self, model_id: str):
+        info = self._local_reg.get(model_id)
+        if not info:
+            return None
+        return type("M", (), {
+            "model_id": model_id,
+            "repo_id": info.get("model_id", model_id),
+            "filename": "",
+            "local_path": info.get("local_path"),
+            "size_bytes": info.get("size_bytes"),
+            "status": DownloadState.COMPLETED,
+            "progress": 100.0,
+            "error": None,
+        })
+
+    def get_download_status(self, model_id: str):
+        # Check active downloads first
+        for tid, p_dict in [(k, self.downloads.get_progress(k)) for k in list(self.downloads._progress.keys())]:
+            if p_dict and p_dict.get("model_id") == model_id:
+                return type("S", (), {
+                    "model_id": model_id,
+                    "progress": p_dict["progress_percent"],
+                    "downloaded_bytes": p_dict["downloaded_bytes"],
+                    "total_bytes": p_dict["total_bytes"],
+                    "status": DownloadState(p_dict["state"]),
+                    "error": p_dict.get("error"),
+                })
+        info = self._local_reg.get(model_id)
+        if info:
+            return type("S", (), {
+                "model_id": model_id,
+                "progress": 100.0,
+                "downloaded_bytes": info.get("size_bytes", 0),
+                "total_bytes": info.get("size_bytes", 0),
+                "status": DownloadState.COMPLETED,
+                "error": None,
+            })
+        return None
+
+
+# Backward-compat alias
+ModelDownloadManager = ModelManager

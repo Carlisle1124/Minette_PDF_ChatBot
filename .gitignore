@@ -317,3 +317,11 @@ cache/
 *.tar.gz
 *.zip
 *.rar
+# Never commit uploaded documents or personal files
+backend/uploaded_docs/
+*.pdf
+
+# Dependencies and local data
+node_modules/
+backend/db/
+backend/models/
